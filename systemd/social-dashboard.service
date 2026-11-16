@@ -10,6 +10,11 @@ Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=SOCIAL_PUBLIC_HOST=social.arorashivoy.win
 Environment=CF_ACCESS_TEAM=polished-art-1ab1.cloudflareaccess.com
 Environment=CF_ACCESS_AUD=<AUD tag of the Cloudflare Access application>
+# Lower priority than Waypoint, the Pi dashboard (CPUWeight 100) and Pi-hole (system slice).
+# Under load, this service gets 1 part of CPU time for each 5 parts of a default service.
+Nice=10
+CPUWeight=20
+IOSchedulingClass=idle
 Restart=on-failure
 RestartSec=5
 

@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>Cutting Room</title>
+<link rel="icon" href="/icon.png" type="image/png">
+<link rel="apple-touch-icon" href="/icon-180.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800&family=DM+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -123,6 +125,12 @@ details { background: var(--surface); border: 1px solid var(--line); padding: 10
 summary { cursor: pointer; font-weight: 600; }
 ol { padding-left: 20px; } ol li { margin: 5px 0; max-width: 72ch; }
 .note { border-left: 4px solid var(--warn); padding: 6px 12px; background: var(--surface); margin: 10px 0; }
+#setupmsg { position: fixed; left: 50%; translate: -50% 0; bottom: max(16px, env(safe-area-inset-bottom)); z-index: 5; margin: 0;
+  width: min(680px, calc(100% - 32px)); max-width: none; background: var(--ink); color: var(--bg); padding: 12px 16px; border-radius: 6px;
+  border-left: 6px solid var(--accent); box-shadow: 0 8px 30px rgb(0 0 0 / .35); overflow-wrap: anywhere; }
+#setupmsg:empty { display: none; }
+.btn.del { padding: 4px 10px; font-size: 13px; border-color: var(--fail); color: var(--fail); }
+.btn.del:hover:not(:disabled), .btn.del.armed { background: var(--fail); color: var(--bg); }
 [hidden] { display: none !important; }
 </style>
 </head>
@@ -134,6 +142,7 @@ ol { padding-left: 20px; } ol li { margin: 5px 0; max-width: 72ch; }
 </header>
 <nav role="tablist">
   <button role="tab" data-tab="clips" aria-selected="true">Clips</button>
+  <button role="tab" data-tab="uploaded" aria-selected="false">Uploaded</button>
   <button role="tab" data-tab="analytics" aria-selected="false">Analytics</button>
   <button role="tab" data-tab="setup" aria-selected="false">Setup</button>
 </nav>
@@ -143,7 +152,11 @@ ol { padding-left: 20px; } ol li { margin: 5px 0; max-width: 72ch; }
   <div class="row"><button class="btn" id="reload">Refresh the clip list</button>
     <span class="muted">Copy the clips to <code id="dir"></code></span></div>
   <div id="cliplist" style="margin-top:18px"></div>
-  <h2>Posted</h2>
+</main>
+
+<main id="uploaded" hidden>
+  <div class="row"><button class="btn" id="ureload">Refresh the list</button><span class="muted" id="usum"></span></div>
+  <p class="muted">Delete removes the raw file from the Pi. The Reel and the Short stay on Instagram and YouTube.</p>
   <div id="history" class="scroll"></div>
 </main>
 
@@ -155,17 +168,30 @@ ol { padding-left: 20px; } ol li { margin: 5px 0; max-width: 72ch; }
 <main id="setup" hidden>
   <h2>Instagram</h2>
   <p id="igstate" class="muted"></p>
-  <details><summary>Steps to get the Instagram token (one time, 15 minutes)</summary>
+  <details><summary>Steps to get the Instagram token with the unified login (one time, 15 minutes)</summary>
     <ol>
       <li>In the Instagram app, open <b>Settings → Account type and tools → Switch to professional account</b>. Select <b>Creator</b>.</li>
-      <li>Open <a href="https://developers.facebook.com/apps" target="_blank" rel="noopener">developers.facebook.com/apps</a>. Create an app. If the page asks for a use case, select <b>Other</b>, then the type <b>Business</b>.</li>
-      <li>In the app, add the product <b>Instagram</b>. Select <b>API setup with Instagram login</b>.</li>
-      <li>In the section <b>Generate access tokens</b>, select <b>Add account</b>. Log in with your Instagram account and accept the permissions.</li>
-      <li>Select <b>Generate token</b> next to the account. Copy the token and paste it below.</li>
+      <li>Open <a href="https://developers.facebook.com/apps" target="_blank" rel="noopener">developers.facebook.com/apps</a> and open your app. A business portfolio must own the app, and the app must have the use case <b>Manage messaging &amp; content on Instagram</b>.</li>
+      <li>Open <b>Use cases → Manage messaging &amp; content on Instagram → Customize → API setup with Unified login</b>.</li>
+      <li>Open <b>Configure your app</b> and select <b>Create new configuration</b>. In the preview, select <b>Edit permissions</b>. Keep <code>instagram_basic</code> and <code>instagram_content_publish</code>, and add <code>instagram_manage_insights</code>. If the page lets you select the life of the token, select the token that does not expire.</li>
+      <li>Select <b>Use this configuration</b>. If the page asks for a redirect URL, enter <code>https://arorashivoy.win/cutting-room/</code> and select <b>Save</b>.</li>
+      <li>Open <b>Generate access tokens</b>. Select <b>Add account</b> and invite your Instagram account as an Instagram Tester.</li>
+      <li>In Instagram on the web, open <b>Settings → Website permissions → Apps and websites → Tester invites</b> and accept the invite.</li>
+      <li>Go back to the Meta app and select <b>Generate token</b> next to the account. Complete the login. Copy the token. Meta shows it one time only.</li>
+      <li>Paste the token below and select <b>Save and test</b>. The token starts with <code>EAA</code>.</li>
     </ol>
-    <p class="muted">The token lasts 60 days. The dashboard renews it automatically each week. The app stays in Development mode. That is sufficient for your own account.</p>
+    <p class="muted">The app stays in Development mode. That is sufficient for your own account. This way needs no Facebook Page.</p>
   </details>
-  <label class="f" for="igtoken">Instagram access token</label>
+  <details><summary>Other token types that the dashboard accepts</summary>
+    <ul>
+      <li><b>Instagram login</b> (older Meta apps): a token that starts with <code>IGAA</code>. The dashboard renews it each week.</li>
+      <li><b>Facebook login</b>: a user token that starts with <code>EAA</code>, from the Graph API Explorer. The Instagram account must be linked to a Facebook Page. Save the Meta app ID and the app secret below first, so the dashboard can change the token into one that lasts 60 days.</li>
+    </ul>
+  </details>
+  <label class="f" for="fbid">Meta app ID (only for a Facebook login token)</label><input type="text" id="fbid" autocomplete="off" inputmode="numeric">
+  <label class="f" for="fbsecret">Meta app secret (only for a Facebook login token)</label>
+  <div class="row"><input type="password" id="fbsecret" autocomplete="off" style="flex:1;min-width:220px"><button class="btn" id="fbsave">Save the app</button></div>
+  <label class="f" for="igtoken">Instagram access token (starts with IGAA or EAA)</label>
   <div class="row"><input type="password" id="igtoken" autocomplete="off" style="flex:1;min-width:220px">
     <button class="btn" id="igsave">Save and test</button><button class="btn" id="igoff">Disconnect</button></div>
 
@@ -226,6 +252,7 @@ function show(tab) {
   for (const b of document.querySelectorAll('nav button')) b.setAttribute('aria-selected', b.dataset.tab === tab);
   for (const m of document.querySelectorAll('main')) m.hidden = m.id !== tab;
   if (tab === 'analytics' && !$('#abody').childElementCount) loadAnalytics(false);
+  if (tab === 'uploaded') loadHistory();
   history.replaceState(null, '', '#' + tab);
 }
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => show(b.dataset.tab));
@@ -236,7 +263,7 @@ async function loadStatus() {
   $('#dir').textContent = status.clips_dir; $('#redir').textContent = status.redirect;
   const pill = (label, s) => h('span', { class: 'pill ' + (s.connected ? 'on' : 'off') }, h('b', {}, label), ' ', s.connected ? (s.name || 'connected') : 'not connected');
   $('#conn').replaceChildren(pill('Instagram', status.instagram), pill('YouTube', status.youtube));
-  $('#igstate').textContent = status.instagram.connected ? `Connected as @${status.instagram.name}.` : 'Not connected.';
+  $('#igstate').textContent = status.instagram.connected ? `Connected as @${status.instagram.name} (${status.instagram.mode === 'fb' ? 'EAA token' : 'Instagram login'}).` : status.instagram.has_app ? 'The Meta app is saved. Paste the token.' : 'Not connected.';
   $('#ytstate').textContent = status.youtube.connected ? `Connected to the channel ${status.youtube.name}.`
     : status.youtube.has_client ? 'The client is saved. Select Connect YouTube.' : 'Not connected.';
   $('#profile').value = status.profile; $('#privacy').value = status.privacy;
@@ -275,7 +302,7 @@ function clipCard(c, i) {
   let busy = false, lintTimer;
   const watch = '/watch/' + encodeURIComponent(c.name);
   const view = h('a', { class: 'view', href: watch, target: '_blank', rel: 'noopener', 'aria-label': 'Open ' + c.name + ' in a new page' },
-    h('img', { src: '/thumb/' + encodeURIComponent(c.name), alt: '', loading: 'lazy' }), h('span', {}, '▶ Open the clip'));
+    h('img', { src: '/thumb/' + encodeURIComponent(c.name) + '?v=' + Math.round(c.mtime), alt: '', loading: 'lazy', decoding: 'async' }), h('span', {}, '▶ Open the clip'));
 
   function gate() {
     igCount.textContent = `${igc.value.length} / 2200`; ytCount.textContent = `${ytt.value.length} / 100`;
@@ -363,22 +390,55 @@ function clipCard(c, i) {
       bar, log));
 }
 
-async function loadHistory(data) {
-  const hist = (data || await api('/api/clips')).history;
-  if (!hist.length) return $('#history').replaceChildren(h('p', { class: 'muted' }, 'No clip is posted from this dashboard.'));
-  $('#history').replaceChildren(h('table', {},
-    h('thead', {}, h('tr', {}, ['Clip', 'Date', 'Instagram', 'YouTube'].map(t => h('th', {}, t)))),
-    h('tbody', {}, hist.map(x => h('tr', {},
-      h('td', {}, x.yt_title || x.clip, ' ', h('a', { class: 'mono', href: '/watch/' + encodeURIComponent(x.file || x.clip), target: '_blank', rel: 'noopener' }, 'watch')), h('td', {}, new Date(x.time * 1000).toLocaleDateString('en-IN')),
-      ...['instagram', 'youtube'].map(p => h('td', {}, x.results[p] ? h('a', { href: x.results[p].url, target: '_blank', rel: 'noopener' }, 'open') : (x.errors || {})[p] ? 'failed' : '–')))))));
+async function loadHistory() {
+  const box = $('#history');
+  let data;
+  try { data = await api('/api/posted'); }
+  catch (e) { $('#usum').textContent = ''; return box.replaceChildren(h('p', { class: 'note' }, e.message === 'not found' ? 'This tab needs a restart of the service.' : e.message)); }
+  const rows = data.rows, onDisk = rows.filter(r => r.exists);
+  $('#usum').textContent = `${rows.length} uploaded, ${onDisk.length} raw files on the Pi (${(onDisk.reduce((t, r) => t + r.size, 0) / 1e6).toFixed(0)} MB) in ${data.dir}`;
+  if (!rows.length) return box.replaceChildren(h('p', { class: 'muted' }, 'No clip is uploaded from this dashboard.'));
+  const link = (r, p) => r.results[p] ? h('a', { href: r.results[p].url, target: '_blank', rel: 'noopener' }, 'open') : r.errors[p] ? 'failed' : '–';
+  box.replaceChildren(h('table', {},
+    h('thead', {}, h('tr', {}, ['Clip', 'Date', 'Instagram', 'YouTube', 'Raw file', ''].map(t => h('th', {}, t)))),
+    h('tbody', {}, rows.map(r => {
+      const fileCell = h('td', {}, r.exists ? (r.size / 1e6).toFixed(1) + ' MB' : r.in_inbox ? 'in the inbox' : 'deleted');
+      const msg = h('span', { class: 'muted', role: 'status' });
+      const del = h('button', { class: 'btn del', type: 'button' }, 'Delete');
+      let armed = null;
+      del.onclick = async () => {
+        if (!armed) {                      // the first click arms the button, the second click deletes
+          del.textContent = 'Confirm delete'; del.classList.add('armed');
+          armed = setTimeout(() => { armed = null; del.textContent = 'Delete'; del.classList.remove('armed'); }, 5000);
+          return;
+        }
+        clearTimeout(armed); del.disabled = true;
+        try {
+          await api('/api/posted/delete', { file: r.file });
+          fileCell.textContent = 'deleted'; del.remove(); watch.replaceWith(''); say('The raw file is deleted.');
+          loadHistorySummary();
+        } catch (e) { msg.textContent = ' ' + e.message; del.disabled = false; del.textContent = 'Delete'; del.classList.remove('armed'); armed = null; }
+      };
+      const watch = h('a', { class: 'mono', href: '/watch/' + encodeURIComponent(r.file), target: '_blank', rel: 'noopener' }, 'watch');
+      return h('tr', {},
+        h('td', {}, r.title, ' ', r.exists ? watch : null, r.title !== r.file ? h('div', { class: 'meta' }, r.file) : null),
+        h('td', {}, new Date(r.time * 1000).toLocaleDateString('en-IN')), h('td', {}, link(r, 'instagram')), h('td', {}, link(r, 'youtube')),
+        fileCell, h('td', {}, r.exists ? del : null, msg));
+    }))));
 }
+async function loadHistorySummary() {
+  try {
+    const d = await api('/api/posted'), on = d.rows.filter(r => r.exists);
+    $('#usum').textContent = `${d.rows.length} uploaded, ${on.length} raw files on the Pi (${(on.reduce((t, r) => t + r.size, 0) / 1e6).toFixed(0)} MB) in ${d.dir}`;
+  } catch {}
+}
+$('#ureload').onclick = loadHistory;
 async function loadClips() {
   const box = $('#cliplist');
   try {
     const data = await api('/api/clips');
     box.replaceChildren(...(data.clips.length ? data.clips.map(clipCard) : [h('div', { class: 'empty' },
       h('p', { style: 'margin:auto' }, 'The inbox is empty. Copy a vertical clip (MP4 or MOV) to ', h('code', {}, status.clips_dir), ', then select Refresh.'))]));
-    loadHistory(data);
   } catch (e) { box.replaceChildren(h('p', { class: 'log err' }, e.message)); }
 }
 $('#reload').onclick = loadClips;
@@ -416,7 +476,8 @@ $('#areload').onclick = () => loadAnalytics(true);
 
 /* ---------- setup ---------- */
 const act = fn => async () => { const m = $('#setupmsg'); m.textContent = 'Work…'; try { m.textContent = (await fn()) || 'Saved.'; await loadStatus(); loadClips(); } catch (e) { m.textContent = 'Error: ' + e.message; } };
-$('#igsave').onclick = act(async () => { await api('/api/config', { ig_token: $('#igtoken').value }); $('#igtoken').value = ''; return 'Instagram is connected.'; });
+$('#igsave').onclick = act(async () => { const r = await api('/api/config', { ig_token: $('#igtoken').value }); $('#igtoken').value = ''; return 'Instagram is connected. ' + (r.note || ''); });
+$('#fbsave').onclick = act(async () => { await api('/api/config', { fb_app_id: $('#fbid').value, fb_app_secret: $('#fbsecret').value }); $('#fbsecret').value = ''; return 'The Meta app is saved.'; });
 $('#igoff').onclick = act(() => api('/api/disconnect', { platform: 'instagram' }).then(() => 'Instagram is disconnected.'));
 $('#ytoff').onclick = act(() => api('/api/disconnect', { platform: 'youtube' }).then(() => 'YouTube is disconnected.'));
 $('#ytsave').onclick = act(async () => { await api('/api/config', { yt_client_id: $('#ytid').value, yt_client_secret: $('#ytsecret').value }); $('#ytsecret').value = ''; });
@@ -424,7 +485,7 @@ $('#ytconnect').onclick = async () => { try { const u = (await api('/api/yt/auth
 $('#ytx').onclick = act(async () => { await api('/api/yt/exchange', { url: $('#yturl').value }); $('#yturl').value = ''; return 'YouTube is connected.'; });
 $('#profsave').onclick = act(() => api('/api/config', { profile: $('#profile').value, privacy: $('#privacy').value }).then(() => 'The profile is saved.'));
 
-loadStatus().then(() => { loadClips(); const t = location.hash.slice(1); if (['analytics', 'setup'].includes(t)) show(t); });
+loadStatus().then(() => { loadClips(); const t = location.hash.slice(1); if (['uploaded', 'analytics', 'setup'].includes(t)) show(t); });
 </script>
 </body>
 </html>

@@ -34,7 +34,8 @@ SKILLS = Path.home() / ".claude" / "skills"
 CLAUDE = os.environ.get("CLAUDE_BIN", str(Path.home() / ".local/bin/claude"))
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 
-IG_API = "https://graph.instagram.com/v27.0"
+IG_API = "https://graph.instagram.com/v27.0"      # token of the Instagram login (starts with IGAA)
+FB_API = "https://graph.facebook.com/v27.0"       # token of the unified login or the Facebook login (starts with EAA)
 YT_API = "https://www.googleapis.com/youtube/v3"
 YT_SCOPES = ("https://www.googleapis.com/auth/youtube.upload "
              "https://www.googleapis.com/auth/youtube.readonly "
@@ -101,10 +102,14 @@ def clip_path(name):
     return None
 
 
+probe_cache = load("probe.json", {})      # "name|mtime|size" -> ffprobe result, kept across restarts
+
+
 def probe(path):
-    key = ("probe", str(path), path.stat().st_mtime, path.stat().st_size)
-    if key in cache:
-        return cache[key]
+    st = path.stat()
+    key = f"{path.name}|{st.st_mtime}|{st.st_size}"
+    if key in probe_cache:
+        return probe_cache[key]
     info = {"duration": 0, "width": 0, "height": 0, "vcodec": "", "acodec": ""}
     try:
         out = subprocess.run(
@@ -126,7 +131,10 @@ def probe(path):
                 info["acodec"] = s.get("codec_name", "")
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
-    cache[key] = info
+    with lock:
+        probe_cache[key] = info
+        if info["width"]:
+            save("probe.json", probe_cache)
     return info
 
 
@@ -172,14 +180,72 @@ def list_clips():
     return out
 
 
+ffmpeg_slot = threading.Semaphore(1)      # the Pi decodes one 1080p frame at a time
+
+
+def grab_frame(path, at, width, out):
+    """Write one scaled frame of a clip. Seek before the input and skip all frames that are not key frames."""
+    with ffmpeg_slot:
+        if not out.exists():
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-threads", "2", "-skip_frame", "nokey", "-ss", f"{at:.2f}",
+                            "-i", str(path), "-frames:v", "1", "-an", "-vf", f"scale={width}:-2", "-q:v", "5", str(out)],
+                           timeout=120)
+    return out if out.exists() else None
+
+
+def posted_list():
+    """The uploaded clips: each history entry, and each file in posted/ that has no history entry."""
+    rows, seen = [], set()
+    for x in state()["history"]:
+        name = x.get("file") or x.get("clip")
+        f = POSTED / name if name and name == os.path.basename(name) else None
+        on_disk = bool(f and f.is_file())
+        seen.add(name)
+        rows.append({"file": name, "title": x.get("yt_title") or x.get("clip"), "time": x.get("time"),
+                     "results": x.get("results", {}), "errors": x.get("errors", {}),
+                     "exists": on_disk, "size": f.stat().st_size if on_disk else 0,
+                     "in_inbox": not on_disk and (INBOX / name).is_file() if name else False})
+    for f in sorted(POSTED.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+        if f.is_file() and f.suffix.lower() in VIDEO_EXT and f.name not in seen and not f.name.startswith("."):
+            rows.append({"file": f.name, "title": f.name, "time": f.stat().st_mtime, "results": {}, "errors": {},
+                         "exists": True, "size": f.stat().st_size, "in_inbox": False})
+    return rows
+
+
+def delete_posted(name):
+    """Delete the raw file of an uploaded clip. Only a file in posted/ is permitted."""
+    if not name or name != os.path.basename(name) or name.startswith("."):
+        raise ApiError("Bad file name.")
+    f = POSTED / name
+    if not f.is_file() or f.suffix.lower() not in VIDEO_EXT:
+        raise ApiError("The file is not in the posted folder.")
+    t = DATA / "thumbs" / (hashlib.sha1(f"{f.name}{f.stat().st_mtime}".encode()).hexdigest()[:16] + ".jpg")
+    size = f.stat().st_size
+    f.unlink()
+    t.unlink(missing_ok=True)
+    print(f"deleted the posted clip {name} ({size} bytes)", flush=True)
+    return size
+
+
 def thumb(path):
-    h = hashlib.sha1(f"{path}{path.stat().st_mtime}".encode()).hexdigest()[:16]
+    h = hashlib.sha1(f"{path.name}{path.stat().st_mtime}".encode()).hexdigest()[:16]
     t = DATA / "thumbs" / f"{h}.jpg"
-    if not t.exists():
-        at = min(1.0, probe(path)["duration"] / 2)
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", str(at), "-i", str(path), "-frames:v", "1",
-                        "-vf", "scale=360:-2", str(t)], timeout=120)
-    return t if t.exists() else None
+    return t if t.exists() else grab_frame(path, min(1.0, probe(path)["duration"] / 2), 360, t)
+
+
+def clean_cache(days=30):
+    """Delete thumbnails and frames that are older than 30 days."""
+    limit = time.time() - days * 86400
+    for f in (DATA / "thumbs").iterdir():
+        if f.stat().st_mtime < limit:
+            f.unlink(missing_ok=True)
+    for d in (DATA / "frames").iterdir():
+        if d.is_dir() and d.stat().st_mtime < limit:
+            shutil.rmtree(d, ignore_errors=True)
+    live = {f"{p.name}|{p.stat().st_mtime}|{p.stat().st_size}" for folder in (INBOX, POSTED)
+            for p in folder.iterdir() if p.is_file()}
+    for k in [k for k in probe_cache if k not in live]:
+        probe_cache.pop(k)
 
 
 # ---------------------------------------------------------------- captions
@@ -247,10 +313,7 @@ def extract_frames(path):
     frames = []
     for i, frac in enumerate((0.08, 0.35, 0.62, 0.9), 1):
         f = d / f"frame{i}.jpg"
-        if not f.exists():
-            subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{dur * frac:.2f}", "-i", str(path),
-                            "-frames:v", "1", "-vf", "scale=480:-2", str(f)], timeout=120)
-        if f.exists():
+        if f.exists() or grab_frame(path, dur * frac, 480, f):
             frames.append(f)
     return d, frames
 
@@ -299,20 +362,77 @@ def ig_token():
     # A long-lived token lasts 60 days. Refresh it when it is older than 7 days.
     if time.time() - c.get("ig_token_time", 0) > 7 * 86400:
         try:
-            r = requests.get("https://graph.instagram.com/refresh_access_token",
-                             params={"grant_type": "ig_refresh_token", "access_token": tok}, timeout=30).json()
-            if r.get("access_token"):
-                tok = r["access_token"]
+            if c.get("ig_mode") == "fb":
+                new = fb_long_token(tok) if c.get("fb_app_id") and c.get("fb_app_secret") else None
+            else:
+                new = requests.get("https://graph.instagram.com/refresh_access_token", timeout=30,
+                                   params={"grant_type": "ig_refresh_token", "access_token": tok}).json().get("access_token")
+            if new:
+                tok = new
                 set_config(ig_token=tok, ig_token_time=time.time())
-        except requests.RequestException:
+        except (requests.RequestException, ApiError):
             pass
     return tok
 
 
+def fb_long_token(tok):
+    """Change a Facebook user token into a token that lasts 60 days. This needs the app ID and the app secret."""
+    c = config()
+    r = requests.get(f"{FB_API}/oauth/access_token", timeout=30, params={
+        "grant_type": "fb_exchange_token", "client_id": c.get("fb_app_id"),
+        "client_secret": c.get("fb_app_secret"), "fb_exchange_token": tok}).json()
+    if "access_token" not in r:
+        raise ApiError(f"Meta did not give a 60-day token: {r.get('error', {}).get('message', r)}")
+    return r["access_token"]
+
+
+def fb_connect(tok):
+    """Find the Instagram account that an EAA token can use.
+
+    Unified login: the account is in /me/assigned_instagram_accounts, and no Facebook Page is necessary.
+    Facebook login: the account is behind a Facebook Page in /me/accounts.
+    """
+    def get(path, fields):
+        return requests.get(f"{FB_API}/{path}", timeout=30,
+                            params={"fields": fields, "access_token": tok, "limit": 100}).json()
+
+    r = get("me/assigned_instagram_accounts", "id,username")
+    accounts = r.get("data") or []
+    first_error = r.get("error", {}).get("message")
+    if not accounts:
+        r = get("me/accounts", "name,instagram_business_account{id,username}")
+        accounts = [p["instagram_business_account"] for p in r.get("data", []) if p.get("instagram_business_account")]
+    if not accounts:
+        why = first_error or r.get("error", {}).get("message") or "the token is valid, but no Instagram account is assigned to it"
+        raise ApiError(f"Instagram: {why}. In the Meta app, add the Instagram account as a tester, accept the "
+                       "invite in Instagram, and generate the token again with the permission instagram_basic.")
+    acct = accounts[0]
+    note = "The life of this token is set in the configuration of the Meta app."
+    if config().get("fb_app_id") and config().get("fb_app_secret"):
+        try:                                   # only a user token of the Facebook login can change to 60 days
+            tok = fb_long_token(tok)
+            note = "The token lasts 60 days."
+        except (ApiError, requests.RequestException):
+            pass
+    set_config(ig_token=tok, ig_token_time=time.time(), ig_mode="fb", ig_user_id=acct["id"],
+               ig_username=acct.get("username", ""))
+    if len(accounts) > 1:
+        note += f" The token can use {len(accounts)} accounts. The dashboard uses @{acct.get('username')}."
+    return note
+
+
+def ig_uid():
+    c = config()
+    return c.get("ig_user_id") if c.get("ig_mode") == "fb" else "me"
+
+
 def ig(method, path, **kw):
-    headers = {"Authorization": f"Bearer {ig_token()}"}
+    tok = ig_token()
+    # Send the token in the header and as a parameter. Some Instagram endpoints read only one of them.
+    kw["params"] = {**kw.get("params", {}), "access_token": tok}
     try:
-        r = requests.request(method, f"{IG_API}/{path}", headers=headers, timeout=60, **kw)
+        base = FB_API if config().get("ig_mode") == "fb" else IG_API
+        r = requests.request(method, f"{base}/{path}", headers={"Authorization": f"Bearer {tok}"}, timeout=60, **kw)
         j = r.json()
     except (requests.RequestException, ValueError) as e:
         raise ApiError(f"Instagram request failed: {e}")
@@ -322,7 +442,14 @@ def ig(method, path, **kw):
 
 
 def ig_me():
-    j = ig("GET", "me", params={"fields": "user_id,username,followers_count,media_count"})
+    if config().get("ig_mode") == "fb":
+        j = ig("GET", ig_uid(), params={"fields": "username,followers_count,media_count"})
+        set_config(ig_username=j.get("username"))
+        return j
+    try:
+        j = ig("GET", "me", params={"fields": "user_id,username,followers_count,media_count"})
+    except ApiError:
+        j = ig("GET", "me", params={"fields": "user_id,username"})
     set_config(ig_user_id=j.get("user_id") or j.get("id"), ig_username=j.get("username"))
     return j
 
@@ -345,8 +472,52 @@ def start_tunnel(job):
     return proc, url
 
 
+def ig_wait_publish(job, uid, cid):
+    step(job, "Instagram: wait while Instagram processes the video")
+    for _ in range(90):
+        time.sleep(10)
+        st = ig("GET", cid, params={"fields": "status_code,status"})
+        if st.get("status_code") == "FINISHED":
+            break
+        if st.get("status_code") in ("ERROR", "EXPIRED"):
+            raise ApiError(f"Instagram rejected the video: {st.get('status')}")
+    else:
+        raise ApiError("Instagram did not finish the video in 15 minutes.")
+    step(job, "Instagram: publish the Reel")
+    mid = ig("POST", f"{uid}/media_publish", json={"creation_id": cid})["id"]
+    link = ig("GET", mid, params={"fields": "permalink"}).get("permalink", "")
+    return {"id": mid, "url": link}
+
+
+def ig_upload_direct(job, path, caption):
+    """Facebook login: send the file from the Pi to Meta. No public link is necessary."""
+    uid = ig_uid()
+    step(job, "Instagram: create the Reel container")
+    c = ig("POST", f"{uid}/media", json={"media_type": "REELS", "upload_type": "resumable", "caption": caption,
+                                         "share_to_feed": True})
+    step(job, "Instagram: upload the file")
+    with open(path, "rb") as f:
+        r = requests.post(c.get("uri") or f"https://rupload.facebook.com/ig-api-upload/v27.0/{c['id']}", data=f,
+                          timeout=1800, headers={"Authorization": f"OAuth {ig_token()}", "offset": "0",
+                                                 "file_size": str(path.stat().st_size)})
+    try:
+        ok = r.json().get("success")
+    except ValueError:
+        ok = False
+    if not ok:
+        raise ApiError(f"Instagram refused the file: {r.text[:200]}")
+    return ig_wait_publish(job, uid, c["id"])
+
+
 def ig_upload(job, path, caption):
     c = config()
+    if c.get("ig_mode") == "fb":
+        try:
+            return ig_upload_direct(job, path, caption)
+        except ApiError as e:
+            if "rejected the video" in str(e) or "did not finish" in str(e):
+                raise
+            step(job, f"Instagram: the direct upload failed ({str(e)[:120]}). Try the public link.")
     uid = c.get("ig_user_id") or ig_me().get("user_id")
     token = secrets.token_urlsafe(24)
     public_tokens[token] = path
@@ -367,20 +538,7 @@ def ig_upload(job, path, caption):
         step(job, "Instagram: create the Reel container")
         cid = ig("POST", f"{uid}/media", json={"media_type": "REELS", "video_url": url, "caption": caption,
                                                "share_to_feed": True})["id"]
-        step(job, "Instagram: wait while Instagram processes the video")
-        for _ in range(90):
-            time.sleep(10)
-            st = ig("GET", cid, params={"fields": "status_code,status"})
-            if st.get("status_code") == "FINISHED":
-                break
-            if st.get("status_code") in ("ERROR", "EXPIRED"):
-                raise ApiError(f"Instagram rejected the video: {st.get('status')}")
-        else:
-            raise ApiError("Instagram did not finish the video in 15 minutes.")
-        step(job, "Instagram: publish the Reel")
-        mid = ig("POST", f"{uid}/media_publish", json={"creation_id": cid})["id"]
-        link = ig("GET", mid, params={"fields": "permalink"}).get("permalink", "")
-        return {"id": mid, "url": link}
+        return ig_wait_publish(job, uid, cid)
     finally:
         public_tokens.pop(token, None)
         if proc:
@@ -389,7 +547,7 @@ def ig_upload(job, path, caption):
 
 def ig_analytics():
     me = ig_me()
-    media = ig("GET", "me/media", params={
+    media = ig("GET", f"{ig_uid()}/media", params={
         "fields": "id,caption,media_product_type,permalink,timestamp,like_count,comments_count", "limit": 15})
     rows = []
     for m in media.get("data", []):
@@ -672,6 +830,7 @@ WATCH_PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <title>{{name}}</title>
+<link rel="icon" href="/icon.png" type="image/png">
 <style>
 :root { color-scheme: dark; }
 body { margin: 0; min-height: 100vh; min-height: 100dvh; display: grid; grid-template-rows: auto 1fr; background: #0c0b09;
@@ -713,7 +872,15 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def send_file(self, path, ctype=None, cache_ctl="no-cache"):
-        size = path.stat().st_size
+        st = path.stat()
+        size = st.st_size
+        etag = f'"{int(st.st_mtime)}-{size}"'
+        if self.headers.get("If-None-Match") == etag and "Range" not in self.headers:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", cache_ctl)
+            self.send_header("Content-Length", "0")
+            return self.end_headers()
         start, end = 0, size - 1
         m = re.match(r"bytes=(\d*)-(\d*)", self.headers.get("Range", ""))
         if m and (m.group(1) or m.group(2)):
@@ -735,22 +902,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype or mimetypes.guess_type(path.name)[0] or "application/octet-stream")
         self.send_header("Content-Length", str(end - start + 1))
         self.send_header("Accept-Ranges", "bytes")
+        self.send_header("ETag", etag)
         self.send_header("Cache-Control", cache_ctl)
         self.end_headers()
-        if self.command == "HEAD":
+        if self.command == "HEAD" or size == 0:
             return
         try:
+            self.wfile.flush()
             with open(path, "rb") as f:
-                f.seek(start)
-                left = end - start + 1
-                while left > 0:
-                    data = f.read(min(256 * 1024, left))
-                    if not data:
-                        break
-                    self.wfile.write(data)
-                    left -= len(data)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+                # The kernel copies the file to the socket. Python does not hold the data in memory.
+                self.connection.sendfile(f, offset=start, count=end - start + 1)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            self.close_connection = True
 
     def guard(self):
         host = (self.headers.get("Host") or "").lower()
@@ -777,6 +940,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/":
                 return self.send_file(ROOT / "static" / "index.html", "text/html; charset=utf-8")
+            if path in ("/icon.png", "/icon-180.png", "/favicon.ico"):
+                name = "icon-180.png" if path == "/icon-180.png" else "icon.png"
+                return self.send_file(ROOT / "static" / name, "image/png", "max-age=86400")
             if path.startswith("/watch/"):
                 p = clip_path(path.split("/", 2)[2])
                 if not p:
@@ -785,21 +951,26 @@ class Handler(BaseHTTPRequestHandler):
                                       .replace("{{src}}", "/media/" + urllib.parse.quote(p.name)))
             if path.startswith(("/media/", "/thumb/")):
                 p = clip_path(path.split("/", 2)[2])
-                if p and path.startswith("/thumb/"):
+                is_thumb = path.startswith("/thumb/")
+                if p and is_thumb:
                     p = thumb(p)
                 if not p:
                     return self.send_json({"error": "not found"}, 404)
-                return self.send_file(p)
+                # The page adds the file time to the thumbnail address, so the browser can keep it.
+                return self.send_file(p, cache_ctl="max-age=31536000, immutable" if is_thumb and "v" in q else "no-cache")
             if path == "/api/status":
                 c = config()
                 return self.send_json({
                     "clips_dir": str(INBOX), "redirect": YT_REDIRECT, "profile": c.get("profile", ""),
                     "privacy": c.get("privacy", "public"),
-                    "instagram": {"connected": bool(c.get("ig_token")), "name": c.get("ig_username")},
+                    "instagram": {"connected": bool(c.get("ig_token")), "name": c.get("ig_username"),
+                                  "mode": c.get("ig_mode") or "ig", "has_app": bool(c.get("fb_app_id") and c.get("fb_app_secret"))},
                     "youtube": {"connected": bool(c.get("yt_refresh_token")), "name": c.get("yt_channel"),
                                 "has_client": bool(c.get("yt_client_id") and c.get("yt_client_secret"))}})
             if path == "/api/clips":
                 return self.send_json({"clips": list_clips(), "history": state()["history"][:30]})
+            if path == "/api/posted":
+                return self.send_json({"rows": posted_list(), "dir": str(POSTED)})
             if path.startswith("/api/job/"):
                 job = jobs.get(path.rsplit("/", 1)[1])
                 return self.send_json(job or {"state": "error", "error": "The job is gone. The server restarted."})
@@ -829,6 +1000,8 @@ class Handler(BaseHTTPRequestHandler):
             name = body.get("clip")
             if path in ("/api/captions", "/api/draft", "/api/upload") and not clip_path(name):
                 raise ApiError("The clip is not in the folder.")
+            if path == "/api/posted/delete":
+                return self.send_json({"ok": True, "freed": delete_posted(str(body.get("file", "")))})
             if path == "/api/captions":
                 return self.send_json(run_job("captions", caption_job, name, str(body.get("note", ""))[:2000]))
             if path == "/api/lint":
@@ -856,16 +1029,36 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(job)
             if path == "/api/config":
                 allowed = {k: str(v).strip() for k, v in body.items()
-                           if k in ("ig_token", "yt_client_id", "yt_client_secret", "profile", "privacy")
+                           if k in ("ig_token", "fb_app_id", "fb_app_secret", "yt_client_id", "yt_client_secret", "profile", "privacy")
                            and (str(v).strip() or k == "profile")}
                 if "ig_token" in allowed:
+                    allowed["ig_token"] = re.sub(r"[\s\"']", "", allowed["ig_token"])
+                    if allowed["ig_token"].startswith("EAA"):
+                        tok = allowed.pop("ig_token")
+                        set_config(**allowed)
+                        try:
+                            return self.send_json({"ok": True, "note": fb_connect(tok)})
+                        except ApiError as e:
+                            print(f"facebook token refused (length {len(tok)}): {e}", flush=True)
+                            raise
+                    if not allowed["ig_token"].startswith("IG"):
+                        t = allowed["ig_token"]
+                        kind = ("the app secret or an app ID" if re.fullmatch(r"[0-9a-f]{32}|\d{10,20}", t)
+                                else "not an Instagram user token")
+                        print(f"instagram token refused before the test (length {len(t)}, starts {t[:4]})", flush=True)
+                        raise ApiError(f"This text is {kind} (length {len(t)}). An Instagram token starts with IGAA "
+                                       "and has more than 100 characters. In the Meta app, open Instagram > API setup "
+                                       "with Instagram login > 2. Generate access tokens > Generate token.")
                     allowed["ig_token_time"] = time.time()
+                    allowed["ig_mode"] = "ig"
                 set_config(**allowed)
                 if "ig_token" in allowed:
                     try:
                         ig_me()
-                    except ApiError:
+                    except ApiError as e:
+                        tok = allowed["ig_token"]
                         set_config(ig_token="", ig_username="")
+                        print(f"instagram token refused (length {len(tok)}, starts {tok[:4]}): {e}", flush=True)
                         raise
                 return self.send_json({"ok": True})
             if path == "/api/yt/exchange":
@@ -876,7 +1069,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True})
             if path == "/api/disconnect":
                 if body.get("platform") == "instagram":
-                    set_config(ig_token="", ig_username="", ig_user_id="")
+                    set_config(ig_token="", ig_username="", ig_user_id="", ig_mode="")
                 elif body.get("platform") == "youtube":
                     set_config(yt_refresh_token="", yt_channel="")
                 cache.clear()
@@ -905,5 +1098,6 @@ class PublicHandler(Handler):
 if __name__ == "__main__":
     pub = ThreadingHTTPServer(("127.0.0.1", PUBLIC_PORT), PublicHandler)
     threading.Thread(target=pub.serve_forever, daemon=True).start()
+    clean_cache()
     print(f"social dashboard on port {PORT}, clips in {INBOX}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
