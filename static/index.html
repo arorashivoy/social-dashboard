@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Cutting Room</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800&family=DM+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f3ede2; --surface: #fffaf0; --sunk: #e9e1d2; --ink: #1b1712; --muted: #675e52; --line: #d6cbb9;
+  --accent: #b93a08; --accent-ink: #fff; --good: #00730a; --warn: #8a5300; --fail: #b3261e;
+  --ig: #2a78d6; --yt: #eb6834;
+  @media (prefers-color-scheme: dark) {
+    --bg: #12100e; --surface: #1c1915; --sunk: #0c0b09; --ink: #f1eadf; --muted: #a89e8f; --line: #38322b;
+    --accent: #ffb224; --accent-ink: #1a1200; --good: #3dbb3d; --warn: #eda100; --fail: #f07a7a;
+    --ig: #3987e5; --yt: #d95926;
+  }
+  --display: "Big Shoulders Display", "Arial Narrow", Impact, sans-serif;
+  --body: "Instrument Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "DM Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  accent-color: var(--accent);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; font: 15px/1.5 var(--body); color: var(--ink); background-color: var(--bg);
+  /* film perforations down the left edge, grain of light behind */
+  background-image:
+    radial-gradient(120% 60% at 85% -10%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 60%),
+    repeating-linear-gradient(to bottom, transparent 0 14px, color-mix(in srgb, var(--ink) 9%, transparent) 14px 26px, transparent 26px 40px);
+  background-size: auto, 10px 40px; background-repeat: no-repeat, repeat-y; background-position: 0 0, 6px 0;
+  min-height: 100vh;
+}
+.wrap { max-width: 1080px; margin: 0 auto; padding: 20px max(16px, env(safe-area-inset-right)) 80px max(28px, env(safe-area-inset-left)); }
+header { display: flex; flex-wrap: wrap; align-items: end; gap: 12px 28px; border-bottom: 3px solid var(--ink); padding-bottom: 12px; }
+h1 { font: 800 clamp(40px, 9vw, 72px)/.85 var(--display); letter-spacing: .01em; text-transform: uppercase; margin: 0; }
+h1 span { color: var(--accent); }
+.conn { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; font: 500 12px var(--mono); }
+.pill { border: 1px solid var(--line); border-radius: 99px; padding: 4px 10px; background: var(--surface); }
+.pill b { font-weight: 500; }
+.pill.on b::before { content: "● "; color: var(--good); }
+.pill.off b::before { content: "○ "; color: var(--muted); }
+nav { display: flex; gap: 4px; margin: 16px 0 22px; }
+nav button { font: 600 20px var(--display); text-transform: uppercase; letter-spacing: .05em; padding: 6px 16px; border: 0;
+  background: none; color: var(--muted); cursor: pointer; border-bottom: 3px solid transparent; }
+nav button[aria-selected="true"] { color: var(--ink); border-color: var(--accent); }
+h2 { font: 800 30px/1 var(--display); text-transform: uppercase; letter-spacing: .03em; margin: 28px 0 12px; }
+h3 { font: 600 13px var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 18px 0 6px; }
+p { margin: 6px 0; max-width: 70ch; }
+.muted { color: var(--muted); } .mono { font-family: var(--mono); }
+a { color: inherit; text-decoration-color: var(--accent); text-underline-offset: 3px; }
+button, input, textarea, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn { border: 1px solid var(--ink); background: var(--surface); padding: 8px 14px; border-radius: 4px; cursor: pointer; font-weight: 600; }
+.btn:hover:not(:disabled) { background: var(--ink); color: var(--bg); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn.go { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font: 800 24px var(--display);
+  text-transform: uppercase; letter-spacing: .06em; padding: 10px 28px; }
+.btn.go:hover:not(:disabled) { filter: brightness(1.1); background: var(--accent); color: var(--accent-ink); }
+textarea, input[type=text], input[type=password], select { width: 100%; background: var(--sunk); border: 1px solid var(--line);
+  border-radius: 4px; padding: 8px 10px; }
+textarea { resize: vertical; min-height: 64px; }
+label.f { display: block; font: 500 12px var(--mono); color: var(--muted); margin: 12px 0 4px; }
+.count { float: right; }
+
+.clip { display: grid; grid-template-columns: minmax(0, 250px) minmax(0, 1fr); gap: 22px; background: var(--surface);
+  border: 1px solid var(--line); border-left: 6px solid var(--ink); padding: 18px; margin-bottom: 22px;
+  animation: rise .5s both; animation-delay: calc(var(--i, 0) * 70ms); }
+@keyframes rise { from { opacity: 0; translate: 0 14px; } }
+@media (prefers-reduced-motion: reduce) { .clip { animation: none; } }
+@media (max-width: 700px) { .clip { grid-template-columns: 1fr; } .view { max-width: 200px; } }
+.view { position: relative; display: block; align-self: start; border-radius: 4px; overflow: hidden; background: #000; }
+.view img { display: block; width: 100%; aspect-ratio: 9/16; object-fit: contain; }
+.view span { position: absolute; inset: auto 0 0 0; padding: 10px 12px; font: 600 18px var(--display); letter-spacing: .06em;
+  text-transform: uppercase; color: #fff; background: linear-gradient(transparent, rgb(0 0 0 / .8)); }
+.view:hover span, .view:focus-visible span { color: var(--accent); }
+.clip h2 { margin: 0 0 2px; font-size: 26px; overflow-wrap: anywhere; }
+.meta { font: 12px var(--mono); color: var(--muted); }
+.checks { list-style: none; padding: 0; margin: 8px 0 0; font-size: 13px; }
+.checks li::before { font-family: var(--mono); margin-right: 6px; }
+.checks .ok::before { content: "✓ OK"; color: var(--good); }
+.checks .warn::before, .checks .WARN::before { content: "! CHECK"; color: var(--warn); }
+.checks .fail::before, .checks .FAIL::before { content: "✕ FAIL"; color: var(--fail); }
+.stepno { font: 800 15px var(--display); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); margin: 20px 0 6px; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.opts { display: grid; gap: 8px; }
+.opt { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; border: 1px solid var(--line); border-radius: 4px;
+  padding: 10px 12px; cursor: pointer; background: var(--bg); }
+.opt:has(input:checked) { border-color: var(--accent); box-shadow: inset 4px 0 0 var(--accent); }
+.opt .angle { font: 600 12px var(--mono); text-transform: uppercase; letter-spacing: .06em; }
+.opt .prev { grid-column: 2; font-size: 13.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.opt .prev .cut { color: var(--muted); }
+.opt .ytt { grid-column: 2; font: 12px var(--mono); color: var(--muted); }
+.badge { font: 500 11px var(--mono); border: 1px solid currentColor; border-radius: 3px; padding: 0 5px; margin-left: 6px; }
+.badge.READY { color: var(--good); } .badge.REVIEW { color: var(--warn); } .badge.FIX { color: var(--fail); }
+.feed { border: 1px dashed var(--line); border-radius: 4px; padding: 8px 10px; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 6px; }
+.log { font: 12.5px var(--mono); background: var(--sunk); border-radius: 4px; padding: 10px 12px; margin-top: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.log .err { color: var(--fail); } .log .fin { color: var(--good); }
+progress { width: 100%; height: 6px; margin-top: 8px; }
+.empty { border: 2px dashed var(--line); padding: 34px 22px; text-align: center; }
+.empty code, code { font-family: var(--mono); background: var(--sunk); padding: 1px 6px; border-radius: 3px; overflow-wrap: anywhere; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.tile { background: var(--surface); border: 1px solid var(--line); padding: 12px 14px; }
+.tile .k { font: 500 11px var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.tile .v { font: 800 40px/1 var(--display); margin-top: 4px; }
+.panel { background: var(--surface); border: 1px solid var(--line); padding: 16px; margin-top: 12px; }
+.bars { display: grid; grid-template-columns: minmax(90px, 34%) 1fr; gap: 6px 10px; align-items: center; font-size: 13px; }
+.bars .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bars .b { display: flex; align-items: center; gap: 8px; font: 12px var(--mono); }
+.bars .b i { display: block; height: 14px; min-width: 2px; border-radius: 0 4px 4px 0; background: var(--c); }
+.bars .b:hover i { filter: brightness(1.2); }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 14px; }
+th { font: 500 11px var(--mono); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--ink); white-space: nowrap; }
+td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: right; font-family: var(--mono); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; font-family: var(--body); white-space: normal; min-width: 180px; }
+details { background: var(--surface); border: 1px solid var(--line); padding: 10px 14px; margin: 10px 0; }
+summary { cursor: pointer; font-weight: 600; }
+ol { padding-left: 20px; } ol li { margin: 5px 0; max-width: 72ch; }
+.note { border-left: 4px solid var(--warn); padding: 6px 12px; background: var(--surface); margin: 10px 0; }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>Cutting <span>Room</span></h1>
+  <div class="conn" id="conn"></div>
+</header>
+<nav role="tablist">
+  <button role="tab" data-tab="clips" aria-selected="true">Clips</button>
+  <button role="tab" data-tab="analytics" aria-selected="false">Analytics</button>
+  <button role="tab" data-tab="setup" aria-selected="false">Setup</button>
+</nav>
+<div role="status" aria-live="polite" id="live" style="position:absolute;left:-9999px"></div>
+
+<main id="clips">
+  <div class="row"><button class="btn" id="reload">Refresh the clip list</button>
+    <span class="muted">Copy the clips to <code id="dir"></code></span></div>
+  <div id="cliplist" style="margin-top:18px"></div>
+  <h2>Posted</h2>
+  <div id="history" class="scroll"></div>
+</main>
+
+<main id="analytics" hidden>
+  <div class="row"><button class="btn" id="areload">Refresh the numbers</button><span class="muted" id="atime"></span></div>
+  <div id="abody"></div>
+</main>
+
+<main id="setup" hidden>
+  <h2>Instagram</h2>
+  <p id="igstate" class="muted"></p>
+  <details><summary>Steps to get the Instagram token (one time, 15 minutes)</summary>
+    <ol>
+      <li>In the Instagram app, open <b>Settings → Account type and tools → Switch to professional account</b>. Select <b>Creator</b>.</li>
+      <li>Open <a href="https://developers.facebook.com/apps" target="_blank" rel="noopener">developers.facebook.com/apps</a>. Create an app. If the page asks for a use case, select <b>Other</b>, then the type <b>Business</b>.</li>
+      <li>In the app, add the product <b>Instagram</b>. Select <b>API setup with Instagram login</b>.</li>
+      <li>In the section <b>Generate access tokens</b>, select <b>Add account</b>. Log in with your Instagram account and accept the permissions.</li>
+      <li>Select <b>Generate token</b> next to the account. Copy the token and paste it below.</li>
+    </ol>
+    <p class="muted">The token lasts 60 days. The dashboard renews it automatically each week. The app stays in Development mode. That is sufficient for your own account.</p>
+  </details>
+  <label class="f" for="igtoken">Instagram access token</label>
+  <div class="row"><input type="password" id="igtoken" autocomplete="off" style="flex:1;min-width:220px">
+    <button class="btn" id="igsave">Save and test</button><button class="btn" id="igoff">Disconnect</button></div>
+
+  <h2>YouTube</h2>
+  <p id="ytstate" class="muted"></p>
+  <details><summary>Steps to connect YouTube (one time, 15 minutes)</summary>
+    <ol>
+      <li>Open <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener">console.cloud.google.com</a> and create a project.</li>
+      <li>In <b>APIs &amp; Services → Library</b>, enable <b>YouTube Data API v3</b> and <b>YouTube Analytics API</b>.</li>
+      <li>In <b>Google Auth Platform → Branding</b>, fill in the app name and your email. In <b>Audience</b>, select <b>External</b>, then select <b>Publish app</b>. A token of an app in Testing status stops after 7 days.</li>
+      <li>In <b>Clients</b>, create a client of the type <b>Desktop app</b>. Copy the client ID and the client secret into the fields below. Select <b>Save</b>.</li>
+      <li>Select <b>Connect YouTube</b>. Log in. Google shows a warning for an unverified app. Select <b>Advanced → Go to the app</b> and accept.</li>
+      <li>The browser then opens an address that starts with <code id="redir"></code>. If the page does not load, copy the full address from the address bar and paste it below.</li>
+    </ol>
+  </details>
+  <div class="note">YouTube locks each video from a new API project to <b>private</b>. After the upload, set the video to public in YouTube Studio. To remove the lock, request the <a href="https://support.google.com/youtube/contact/yt_api_form" target="_blank" rel="noopener">API audit</a> from Google.</div>
+  <label class="f" for="ytid">Client ID</label><input type="text" id="ytid" autocomplete="off">
+  <label class="f" for="ytsecret">Client secret</label><input type="password" id="ytsecret" autocomplete="off">
+  <div class="row" style="margin-top:10px"><button class="btn" id="ytsave">Save</button>
+    <button class="btn" id="ytconnect">Connect YouTube</button><button class="btn" id="ytoff">Disconnect</button></div>
+  <label class="f" for="yturl">Address from the browser after the Google login</label>
+  <div class="row"><input type="text" id="yturl" autocomplete="off" style="flex:1;min-width:220px"><button class="btn" id="ytx">Finish</button></div>
+
+  <h2>Channel profile</h2>
+  <p class="muted">Claude reads this text before it writes captions. Give the topic of the channel, the audience, the tone and your usual call to action.</p>
+  <textarea id="profile" rows="6" aria-label="Channel profile"></textarea>
+  <label class="f" for="privacy">Default visibility on YouTube</label>
+  <select id="privacy" style="max-width:220px"><option>public</option><option>unlisted</option><option>private</option></select>
+  <div class="row" style="margin-top:10px"><button class="btn" id="profsave">Save the profile</button></div>
+  <p id="setupmsg" class="mono" role="status"></p>
+</main>
+</div>
+
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const h = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') e.className = v; else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else if (v === true) e.setAttribute(k, ''); else if (v !== false && v != null) e.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null) e.append(k);
+  return e;
+};
+async function api(path, body) {
+  const r = await fetch(path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
+  const j = await r.json().catch(() => ({ error: 'The server gave no JSON.' }));
+  if (!r.ok || j.error) throw new Error(j.error || r.statusText);
+  return j;
+}
+const say = t => { $('#live').textContent = t; };
+const num = n => n == null ? '–' : Number(n).toLocaleString('en-IN');
+const dur = s => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+let status = {};
+
+/* ---------- tabs ---------- */
+function show(tab) {
+  for (const b of document.querySelectorAll('nav button')) b.setAttribute('aria-selected', b.dataset.tab === tab);
+  for (const m of document.querySelectorAll('main')) m.hidden = m.id !== tab;
+  if (tab === 'analytics' && !$('#abody').childElementCount) loadAnalytics(false);
+  history.replaceState(null, '', '#' + tab);
+}
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => show(b.dataset.tab));
+
+/* ---------- status ---------- */
+async function loadStatus() {
+  status = await api('/api/status');
+  $('#dir').textContent = status.clips_dir; $('#redir').textContent = status.redirect;
+  const pill = (label, s) => h('span', { class: 'pill ' + (s.connected ? 'on' : 'off') }, h('b', {}, label), ' ', s.connected ? (s.name || 'connected') : 'not connected');
+  $('#conn').replaceChildren(pill('Instagram', status.instagram), pill('YouTube', status.youtube));
+  $('#igstate').textContent = status.instagram.connected ? `Connected as @${status.instagram.name}.` : 'Not connected.';
+  $('#ytstate').textContent = status.youtube.connected ? `Connected to the channel ${status.youtube.name}.`
+    : status.youtube.has_client ? 'The client is saved. Select Connect YouTube.' : 'Not connected.';
+  $('#profile').value = status.profile; $('#privacy').value = status.privacy;
+}
+
+/* ---------- clips ---------- */
+function pollJob(id, onTick) {
+  return new Promise(resolve => {
+    const t = setInterval(async () => {
+      let j; try { j = await api('/api/job/' + id); } catch (e) { j = { state: 'error', error: e.message, steps: [] }; }
+      onTick(j);
+      if (j.state !== 'running') { clearInterval(t); resolve(j); }
+    }, 2000);
+  });
+}
+
+function clipCard(c, i) {
+  const d = c.draft || {};
+  const st = { options: d.options || [], selected: d.selected ?? null };
+  const note = h('textarea', { rows: 2, placeholder: 'Example: 40 km ride to the Coorg viewpoint before sunrise. The fog clears at the end.' });
+  note.value = d.note || '';
+  const optBox = h('div', { class: 'opts' });
+  const igc = h('textarea', { rows: 7 }), ytt = h('input', { type: 'text', maxlength: 100 }), ytd = h('textarea', { rows: 3 });
+  igc.value = d.ig_caption || ''; ytt.value = d.yt_title || ''; ytd.value = d.yt_description || '';
+  const igCount = h('span', { class: 'count' }), ytCount = h('span', { class: 'count' });
+  const lintBox = h('div'), log = h('div', { class: 'log', hidden: true }), bar = h('progress', { hidden: true, 'aria-label': 'Upload progress', max: 100 });
+  const editor = h('div', { hidden: true });
+  const sugBtn = h('button', { class: 'btn', type: 'button' }, 'Suggest 3 captions');
+  const upBtn = h('button', { class: 'btn go', type: 'button', disabled: true }, 'Upload');
+  const upHint = h('span', { class: 'muted' });
+  const mk = (p, label) => { const cb = h('input', { type: 'checkbox' }); cb.checked = status[p].connected; cb.disabled = !status[p].connected;
+    cb.onchange = gate; return [cb, h('label', {}, cb, ' ', label, status[p].connected ? '' : ' (not connected)')]; };
+  const [igOn, igLab] = mk('instagram', 'Instagram Reel'), [ytOn, ytLab] = mk('youtube', 'YouTube Short');
+  const priv = h('select', { style: 'width:auto', 'aria-label': 'YouTube visibility' }, ...['public', 'unlisted', 'private'].map(p => h('option', {}, p)));
+  priv.value = status.privacy;
+  let busy = false, lintTimer;
+  const watch = '/watch/' + encodeURIComponent(c.name);
+  const view = h('a', { class: 'view', href: watch, target: '_blank', rel: 'noopener', 'aria-label': 'Open ' + c.name + ' in a new page' },
+    h('img', { src: '/thumb/' + encodeURIComponent(c.name), alt: '', loading: 'lazy' }), h('span', {}, '▶ Open the clip'));
+
+  function gate() {
+    igCount.textContent = `${igc.value.length} / 2200`; ytCount.textContent = `${ytt.value.length} / 100`;
+    const picked = st.selected !== null;
+    const any = igOn.checked || ytOn.checked;
+    const text = (!igOn.checked || igc.value.trim()) && (!ytOn.checked || ytt.value.trim());
+    upBtn.disabled = busy || !picked || !any || !text;
+    upHint.textContent = busy ? '' : !picked ? 'Select a caption first.' : !any ? 'Connect a platform in Setup.' : !text ? 'The caption or the title is empty.' : 'One click sends the clip to the selected platforms.';
+  }
+  function showLint(l) {
+    if (!l) return lintBox.replaceChildren();
+    lintBox.replaceChildren(
+      h('label', { class: 'f' }, 'What the feed shows before "… more"', h('span', { class: 'badge ' + l.verdict }, l.verdict)),
+      h('div', { class: 'feed' }, l.visible),
+      h('ul', { class: 'checks' }, l.checks.map(k => h('li', { class: k.status }, `${k.check}: ${k.detail}`))));
+  }
+  function relint() { clearTimeout(lintTimer); lintTimer = setTimeout(async () => { try { showLint((await api('/api/lint', { text: igc.value })).lint); } catch {} }, 600); }
+  const saveDraft = () => api('/api/draft', { clip: c.name, note: note.value, selected: st.selected, ig_caption: igc.value, yt_title: ytt.value, yt_description: ytd.value }).catch(() => {});
+  function pick(idx) {
+    st.selected = idx;
+    const o = st.options[idx];
+    if (o) { igc.value = o.ig_caption; ytt.value = o.yt_title; ytd.value = o.yt_description; showLint(o.lint); }
+    else relint();
+    editor.hidden = false; gate(); saveDraft();
+  }
+  function renderOpts() {
+    const gname = 'opt-' + i;
+    const card = (idx, angle, body, yt, lint) => {
+      const r = h('input', { type: 'radio', name: gname }); r.checked = st.selected === idx; r.onchange = () => pick(idx);
+      const prev = h('span', { class: 'prev' });
+      if (body) prev.append(body.slice(0, 125), h('span', { class: 'cut' }, body.length > 125 ? body.slice(125, 260) + (body.length > 260 ? ' …' : '') : ''));
+      return h('label', { class: 'opt' }, r, h('span', { class: 'angle' }, angle, lint ? h('span', { class: 'badge ' + lint.verdict }, lint.verdict) : null), prev, yt ? h('span', { class: 'ytt' }, 'YouTube title: ' + yt) : null);
+    };
+    optBox.replaceChildren(...st.options.map((o, k) => card(k, o.angle || `Option ${k + 1}`, o.ig_caption, o.yt_title, o.lint)), card('own', 'Write my own', '', '', null));
+  }
+  sugBtn.onclick = async () => {
+    sugBtn.disabled = true; log.hidden = false; log.textContent = 'Start…';
+    try {
+      const job = await api('/api/captions', { clip: c.name, note: note.value });
+      const done = await pollJob(job.id, j => { log.textContent = (j.steps || []).join('\n'); });
+      if (done.state === 'error') throw new Error(done.error);
+      st.options = done.options; st.selected = null; renderOpts(); gate(); log.hidden = true; say('3 caption options are ready.');
+    } catch (e) { log.replaceChildren(h('span', { class: 'err' }, e.message)); }
+    sugBtn.disabled = false; sugBtn.textContent = 'Suggest 3 new captions';
+  };
+  upBtn.onclick = async () => {
+    busy = true; gate(); log.hidden = false; log.textContent = 'Start…'; bar.hidden = false; bar.removeAttribute('value');
+    const platforms = [igOn.checked && 'instagram', ytOn.checked && 'youtube'].filter(Boolean);
+    try {
+      const job = await api('/api/upload', { clip: c.name, platforms, ig_caption: igc.value, yt_title: ytt.value, yt_description: ytd.value, privacy: priv.value });
+      const done = await pollJob(job.id, j => { log.textContent = (j.steps || []).join('\n'); if (j.progress && j.progress < 100) bar.value = j.progress; else bar.removeAttribute('value'); });
+      bar.hidden = true;
+      const lines = Object.entries(done.results || {}).map(([p, r]) => h('div', { class: 'fin' }, `${p}: published `, h('a', { href: r.url, target: '_blank', rel: 'noopener' }, r.url), r.note ? h('div', { class: 'err' }, r.note) : null));
+      const errs = Object.entries(done.errors || {}).map(([p, e]) => h('div', { class: 'err' }, `${p}: ${e}`));
+      log.replaceChildren(...lines, ...errs, ...(lines.length || errs.length ? [] : [h('span', { class: 'err' }, done.error || 'The upload failed.')]));
+      say(errs.length ? 'The upload finished with an error.' : 'The upload is complete.');
+      if (lines.length && !errs.length) { upBtn.hidden = true; upHint.textContent = 'The clip is in the posted folder.'; loadHistory(); return; }
+      if (lines.length) loadHistory();
+    } catch (e) { bar.hidden = true; log.replaceChildren(h('span', { class: 'err' }, e.message)); }
+    busy = false; gate();
+  };
+  igc.oninput = () => { gate(); relint(); }; ytt.oninput = gate;
+  for (const el of [note, igc, ytt, ytd]) el.onchange = saveDraft;
+
+  editor.append(
+    h('label', { class: 'f' }, 'Instagram caption', igCount), igc, lintBox,
+    h('label', { class: 'f' }, 'YouTube title', ytCount), ytt,
+    h('label', { class: 'f' }, 'YouTube description'), ytd);
+  renderOpts();
+  if (st.selected !== null) { editor.hidden = false; relint(); }
+  gate();
+  return h('article', { class: 'clip', style: `--i:${i}` },
+    view,
+    h('div', {},
+      h('h2', {}, c.name),
+      h('div', { class: 'meta' }, `${dur(c.duration)} · ${c.width}×${c.height} · ${(c.size / 1e6).toFixed(1)} MB · ${c.vcodec || '?'}`),
+      h('ul', { class: 'checks' }, c.checks.map(k => h('li', { class: k.level }, k.text))),
+      h('div', { class: 'stepno' }, '1 · Tell Claude about the clip'),
+      note, h('div', { class: 'row', style: 'margin-top:8px' }, sugBtn, h('span', { class: 'muted' }, 'Claude looks at 4 frames of the clip. It does not hear the sound.')),
+      h('div', { class: 'stepno' }, '2 · Select a caption'),
+      h('fieldset', {}, h('legend', { style: 'position:absolute;left:-9999px' }, 'Caption options'), optBox), editor,
+      h('div', { class: 'stepno' }, '3 · Upload'),
+      h('div', { class: 'row' }, igLab, ytLab, h('label', {}, 'YouTube visibility ', priv)),
+      h('div', { class: 'row', style: 'margin-top:12px' }, upBtn, upHint),
+      bar, log));
+}
+
+async function loadHistory(data) {
+  const hist = (data || await api('/api/clips')).history;
+  if (!hist.length) return $('#history').replaceChildren(h('p', { class: 'muted' }, 'No clip is posted from this dashboard.'));
+  $('#history').replaceChildren(h('table', {},
+    h('thead', {}, h('tr', {}, ['Clip', 'Date', 'Instagram', 'YouTube'].map(t => h('th', {}, t)))),
+    h('tbody', {}, hist.map(x => h('tr', {},
+      h('td', {}, x.yt_title || x.clip, ' ', h('a', { class: 'mono', href: '/watch/' + encodeURIComponent(x.file || x.clip), target: '_blank', rel: 'noopener' }, 'watch')), h('td', {}, new Date(x.time * 1000).toLocaleDateString('en-IN')),
+      ...['instagram', 'youtube'].map(p => h('td', {}, x.results[p] ? h('a', { href: x.results[p].url, target: '_blank', rel: 'noopener' }, 'open') : (x.errors || {})[p] ? 'failed' : '–')))))));
+}
+async function loadClips() {
+  const box = $('#cliplist');
+  try {
+    const data = await api('/api/clips');
+    box.replaceChildren(...(data.clips.length ? data.clips.map(clipCard) : [h('div', { class: 'empty' },
+      h('p', { style: 'margin:auto' }, 'The inbox is empty. Copy a vertical clip (MP4 or MOV) to ', h('code', {}, status.clips_dir), ', then select Refresh.'))]));
+    loadHistory(data);
+  } catch (e) { box.replaceChildren(h('p', { class: 'log err' }, e.message)); }
+}
+$('#reload').onclick = loadClips;
+
+/* ---------- analytics ---------- */
+function platformBlock(title, color, p, cols) {
+  if (p.error) return [h('h2', {}, title), h('p', { class: 'note' }, p.error)];
+  const a = p.account, rows = p.rows, max = Math.max(1, ...rows.map(r => r.views || 0));
+  const tiles = [['Account', a.name], [title === 'YouTube' ? 'Subscribers' : 'Followers', num(a.followers)], ['Posts', num(a.posts)]];
+  if (a.views != null) tiles.push(['Channel views', num(a.views)]);
+  tiles.push([`Views, last ${rows.length} posts`, num(rows.reduce((s, r) => s + (r.views || 0), 0))]);
+  return [h('h2', {}, title),
+    h('div', { class: 'tiles' }, tiles.map(([k, v]) => h('div', { class: 'tile' }, h('div', { class: 'k' }, k), h('div', { class: 'v', style: String(v).length > 9 ? 'font-size:24px' : '' }, v)))),
+    h('div', { class: 'panel' },
+      h('h3', { style: 'margin-top:0' }, 'Views for each post, newest first'),
+      rows.length ? h('div', { class: 'bars', style: `--c:${color}` }, rows.flatMap(r => [
+        h('a', { class: 't', href: r.url, target: '_blank', rel: 'noopener', title: r.title }, r.title),
+        h('div', { class: 'b', title: `${r.title}\n${r.date} · ${num(r.views)} views` }, h('i', { style: `width:${(r.views || 0) / max * 80}%` }), num(r.views))])) : h('p', { class: 'muted' }, 'No posts.'),
+      rows.length ? h('div', { class: 'scroll' }, h('table', {},
+        h('thead', {}, h('tr', {}, h('th', {}, 'Post'), h('th', {}, 'Date'), cols.map(c => h('th', {}, c[0])))),
+        h('tbody', {}, rows.map(r => h('tr', {}, h('td', {}, h('a', { href: r.url, target: '_blank', rel: 'noopener' }, r.title)), h('td', {}, r.date), cols.map(c => h('td', {}, c[2] ? c[2](r[c[1]]) : num(r[c[1]])))))))) : null)];
+}
+async function loadAnalytics(refresh) {
+  $('#abody').replaceChildren(h('p', { class: 'muted' }, 'Read the numbers…'));
+  try {
+    const a = await api('/api/analytics' + (refresh ? '?refresh=1' : ''));
+    $('#atime').textContent = 'Read at ' + new Date(a.time * 1000).toLocaleTimeString('en-IN');
+    const sec = v => v == null ? '–' : (v > 1000 ? v / 1000 : v).toFixed(1) + ' s';
+    $('#abody').replaceChildren(
+      ...platformBlock('Instagram', 'var(--ig)', a.instagram, [['Views', 'views'], ['Reach', 'reach'], ['Likes', 'likes'], ['Comments', 'comments'], ['Saves', 'saved'], ['Shares', 'shares'], ['Avg watch', 'ig_reels_avg_watch_time', sec]]),
+      ...platformBlock('YouTube', 'var(--yt)', a.youtube, [['Views', 'views'], ['Likes', 'likes'], ['Comments', 'comments'], ['Avg viewed', 'avg_pct', v => v == null ? '–' : v + '%'], ['Length', 'seconds', v => dur(v || 0)], ['Visibility', 'privacy', v => v || '–']]));
+  } catch (e) { $('#abody').replaceChildren(h('p', { class: 'note' }, e.message)); }
+}
+$('#areload').onclick = () => loadAnalytics(true);
+
+/* ---------- setup ---------- */
+const act = fn => async () => { const m = $('#setupmsg'); m.textContent = 'Work…'; try { m.textContent = (await fn()) || 'Saved.'; await loadStatus(); loadClips(); } catch (e) { m.textContent = 'Error: ' + e.message; } };
+$('#igsave').onclick = act(async () => { await api('/api/config', { ig_token: $('#igtoken').value }); $('#igtoken').value = ''; return 'Instagram is connected.'; });
+$('#igoff').onclick = act(() => api('/api/disconnect', { platform: 'instagram' }).then(() => 'Instagram is disconnected.'));
+$('#ytoff').onclick = act(() => api('/api/disconnect', { platform: 'youtube' }).then(() => 'YouTube is disconnected.'));
+$('#ytsave').onclick = act(async () => { await api('/api/config', { yt_client_id: $('#ytid').value, yt_client_secret: $('#ytsecret').value }); $('#ytsecret').value = ''; });
+$('#ytconnect').onclick = async () => { try { const u = (await api('/api/yt/auth-url')).url; if (!window.open(u, '_blank')) $('#setupmsg').replaceChildren(h('a', { href: u, target: '_blank', rel: 'noopener' }, 'Open the Google login')); } catch (e) { $('#setupmsg').textContent = 'Error: ' + e.message; } };
+$('#ytx').onclick = act(async () => { await api('/api/yt/exchange', { url: $('#yturl').value }); $('#yturl').value = ''; return 'YouTube is connected.'; });
+$('#profsave').onclick = act(() => api('/api/config', { profile: $('#profile').value, privacy: $('#privacy').value }).then(() => 'The profile is saved.'));
+
+loadStatus().then(() => { loadClips(); const t = location.hash.slice(1); if (['analytics', 'setup'].includes(t)) show(t); });
+</script>
+</body>
+</html>

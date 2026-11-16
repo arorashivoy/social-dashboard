@@ -1,0 +1,17 @@
+[Unit]
+Description=Social dashboard (Instagram Reels and YouTube Shorts)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/social-dashboard
+ExecStart=/usr/bin/python3 %h/projects/social-dashboard/server.py
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=SOCIAL_PUBLIC_HOST=social.arorashivoy.win
+Environment=CF_ACCESS_TEAM=polished-art-1ab1.cloudflareaccess.com
+Environment=CF_ACCESS_AUD=<AUD tag of the Cloudflare Access application>
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
