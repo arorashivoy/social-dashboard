@@ -23,6 +23,20 @@ A dashboard on the Raspberry Pi that publishes a clip as an Instagram Reel and a
 
 The steps for the Instagram token and the YouTube client are on the **Setup** tab.
 
+### Cover images
+
+The clipping tool can put a cover next to a short: `X.jpg` for `X.mp4`, in the same folder (JPEG, 1080x1920).
+The pairing by file name is the rule. The block `thumbnail` in the MP4 record is only extra information.
+
+- **Preview:** the inbox and the Uploaded tab show the cover. If there is no cover, they show a frame of the clip.
+- **Instagram:** the server sends the cover as `cover_url` in the REELS container. The tunnel serves the cover at
+  `/v/<token>/cover.jpg`, with the same token as the clip. With the Facebook login, the server opens the tunnel
+  only when a cover exists. If the tunnel does not start, the Reel goes out without the cover.
+- **YouTube:** after the upload, the server tries `thumbnails.set`. If YouTube refuses it (for example, the channel
+  is not verified), the job shows a warning and the upload stays complete.
+- **Files:** the cover moves to `posted/` with the clip, and a delete removes the cover too. A `.jpg` alone is
+  never a clip.
+
 ## Access rules
 
 The server has no login of its own. It accepts two types of request:

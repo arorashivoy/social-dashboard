@@ -76,6 +76,7 @@ label.f { display: block; font: 500 12px var(--mono); color: var(--muted); margi
 @media (max-width: 700px) { .clip { grid-template-columns: 1fr; } .view { max-width: 200px; } }
 .view { position: relative; display: block; align-self: start; border-radius: 4px; overflow: hidden; background: #000; }
 .view img { display: block; width: 100%; aspect-ratio: 9/16; object-fit: contain; }
+.pthumb { float: left; width: 45px; aspect-ratio: 9/16; object-fit: cover; margin-right: 10px; border-radius: 3px; background: #000; }
 .view span { position: absolute; inset: auto 0 0 0; padding: 10px 12px; font: 600 18px var(--display); letter-spacing: .06em;
   text-transform: uppercase; color: #fff; background: linear-gradient(transparent, rgb(0 0 0 / .8)); }
 .view:hover span, .view:focus-visible span { color: var(--accent); }
@@ -302,7 +303,7 @@ function clipCard(c, i) {
   let busy = false, lintTimer;
   const watch = '/watch/' + encodeURIComponent(c.name);
   const view = h('a', { class: 'view', href: watch, target: '_blank', rel: 'noopener', 'aria-label': 'Open ' + c.name + ' in a new page' },
-    h('img', { src: '/thumb/' + encodeURIComponent(c.name) + '?v=' + Math.round(c.mtime), alt: '', loading: 'lazy', decoding: 'async' }), h('span', {}, '▶ Open the clip'));
+    h('img', { src: '/thumb/' + encodeURIComponent(c.name) + '?v=' + (c.thumb_v || Math.round(c.mtime)), alt: '', loading: 'lazy', decoding: 'async' }), h('span', {}, '▶ Open the clip'));
 
   function gate() {
     igCount.textContent = `${igc.value.length} / 2200`; ytCount.textContent = `${ytt.value.length} / 100`;
@@ -439,7 +440,8 @@ async function loadHistory() {
       };
       const watch = h('a', { class: 'mono', href: '/watch/' + encodeURIComponent(r.file), target: '_blank', rel: 'noopener' }, 'watch');
       return h('tr', {},
-        h('td', {}, r.title, ' ', r.exists ? watch : null, r.title !== r.file ? h('div', { class: 'meta' }, r.file) : null),
+        h('td', {}, r.exists ? h('img', { class: 'pthumb', src: '/thumb/' + encodeURIComponent(r.file) + '?v=' + r.thumb_v, alt: '', loading: 'lazy', decoding: 'async' }) : null,
+          r.title, ' ', r.exists ? watch : null, r.title !== r.file ? h('div', { class: 'meta' }, r.file) : null),
         h('td', {}, new Date(r.time * 1000).toLocaleDateString('en-IN')), h('td', {}, link(r, 'instagram')), h('td', {}, link(r, 'youtube')),
         fileCell, h('td', {}, r.exists ? del : null, msg));
     }))));

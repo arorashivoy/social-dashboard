@@ -5,6 +5,7 @@ The server uses only the Python standard library and `requests`.
 Read README.md for the setup of the Instagram token and the YouTube client.
 """
 
+import contextlib
 import hashlib
 import html
 import ipaddress
@@ -102,6 +103,18 @@ def clip_path(name):
     return None
 
 
+def cover_path(path):
+    """The cover image that the clipping tool puts next to a short (X.mp4 -> X.jpg), or None."""
+    c = path.with_suffix(".jpg")
+    return c if c.is_file() else None
+
+
+def preview_version(path):
+    """A number that changes when the clip or its cover changes. The page adds it to the thumbnail address."""
+    c = cover_path(path)
+    return round(max(path.stat().st_mtime, c.stat().st_mtime if c else 0))
+
+
 probe_cache = load("probe.json", {})      # "name|mtime|size" -> ffprobe result, kept across restarts
 
 
@@ -196,6 +209,7 @@ def list_clips():
             continue            # the copy of the file is possibly not complete
         info = probe(p)
         out.append({"name": p.name, "size": p.stat().st_size, "mtime": p.stat().st_mtime, **info,
+                    "cover": bool(cover_path(p)), "thumb_v": preview_version(p),
                     "checks": clip_checks(p, info), "draft": drafts.get(p.name, {})})
     return out
 
@@ -207,7 +221,7 @@ def grab_frame(path, at, width, out):
     """Write one scaled frame of a clip. Seek before the input and skip all frames that are not key frames."""
     with ffmpeg_slot:
         if not out.exists():
-            subprocess.run(["ffmpeg", "-v", "error", "-y", "-threads", "2", "-skip_frame", "nokey", "-ss", f"{at:.2f}",
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-threads", "2", "-skip_frame", "nokey", *(["-ss", f"{at:.2f}"] if at else []),
                             "-i", str(path), "-frames:v", "1", "-an", "-vf", f"scale={width}:-2", "-q:v", "5", str(out)],
                            timeout=120)
     return out if out.exists() else None
@@ -224,11 +238,12 @@ def posted_list():
         rows.append({"file": name, "title": x.get("yt_title") or x.get("clip"), "time": x.get("time"),
                      "results": x.get("results", {}), "errors": x.get("errors", {}),
                      "exists": on_disk, "size": f.stat().st_size if on_disk else 0,
+                     "thumb_v": preview_version(f) if on_disk else None,
                      "in_inbox": not on_disk and (INBOX / name).is_file() if name else False})
     for f in sorted(POSTED.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
         if f.is_file() and f.suffix.lower() in VIDEO_EXT and f.name not in seen and not f.name.startswith("."):
             rows.append({"file": f.name, "title": f.name, "time": f.stat().st_mtime, "results": {}, "errors": {},
-                         "exists": True, "size": f.stat().st_size, "in_inbox": False})
+                         "exists": True, "size": f.stat().st_size, "in_inbox": False, "thumb_v": preview_version(f)})
     return rows
 
 
@@ -239,10 +254,12 @@ def delete_posted(name):
     f = POSTED / name
     if not f.is_file() or f.suffix.lower() not in VIDEO_EXT:
         raise ApiError("The file is not in the posted folder.")
-    t = DATA / "thumbs" / (hashlib.sha1(f"{f.name}{f.stat().st_mtime}".encode()).hexdigest()[:16] + ".jpg")
+    t, cover = thumb_file(f), cover_path(f)
     size = f.stat().st_size
     f.unlink()
     t.unlink(missing_ok=True)
+    if cover:
+        cover.unlink(missing_ok=True)
     print(f"deleted the posted clip {name} ({size} bytes)", flush=True)
     return size
 
@@ -256,10 +273,12 @@ def delete_inbox(name):
         raise ApiError("The clip is not in the inbox.")
     if any(j["state"] == "running" and j.get("clip") == name for j in jobs.values()):
         raise ApiError("A caption job or an upload uses this clip. Wait until it is complete.")
-    t = DATA / "thumbs" / (hashlib.sha1(f"{f.name}{f.stat().st_mtime}".encode()).hexdigest()[:16] + ".jpg")
+    t, cover = thumb_file(f), cover_path(f)
     size = f.stat().st_size
     f.unlink()
     t.unlink(missing_ok=True)
+    if cover:
+        cover.unlink(missing_ok=True)
     with lock:
         st = state()
         if st["drafts"].pop(name, None) is not None:
@@ -268,10 +287,21 @@ def delete_inbox(name):
     return size
 
 
+def thumb_file(path):
+    """The cache file of the preview. The key has the time of the cover, so a new cover makes a new preview."""
+    c = cover_path(path)
+    key = f"{path.name}{path.stat().st_mtime}" + (f"|cover{c.stat().st_mtime}" if c else "")
+    return DATA / "thumbs" / (hashlib.sha1(key.encode()).hexdigest()[:16] + ".jpg")
+
+
 def thumb(path):
-    h = hashlib.sha1(f"{path.name}{path.stat().st_mtime}".encode()).hexdigest()[:16]
-    t = DATA / "thumbs" / f"{h}.jpg"
-    return t if t.exists() else grab_frame(path, min(1.0, probe(path)["duration"] / 2), 360, t)
+    """The preview of a clip: the cover X.jpg if it exists, else a frame of the clip. Both are scaled to 360 px."""
+    t, c = thumb_file(path), cover_path(path)
+    if t.exists():
+        return t
+    if c:
+        return grab_frame(c, 0, 360, t) or c
+    return grab_frame(path, min(1.0, probe(path)["duration"] / 2), 360, t)
 
 
 def clean_cache(days=30):
@@ -343,7 +373,8 @@ Follow the skill `ig-caption` below for the Instagram caption. It is the authori
 </skill>
 
 How to apply the skills in this run:
-- This is a Reel, so the caption has Job A. Do not ask which job it is.
+- The channel profile below sets the order of the caption: line 1 is the hook, and the ask comes after it.
+  Where the profile and the skill differ, follow the profile. Do not ask which job it is.
 - Do not run `caption.py`, `humanize.py` or `detect.py`. The dashboard runs them on your answer and shows the result.
   Write text that passes them: follow each rule of the two skills now.
 - Do not ask the creator for the search terms. Select 2 or 3 from the clip data and the channel profile, and use
@@ -378,6 +409,7 @@ The captions with their linter result:
 {items}
 
 Write each caption again so that the linter passes. Keep the angle, the facts and the search terms.
+Keep the order: the hook is line 1, and the ask comes after the hook. Never move the ask into line 1.
 Do not invent facts. Do not use tools.
 Reply with ONLY a JSON object, no code fence, in this shape:
 {{"fixed":[{{"index":0,"ig_caption":"..."}}]}}"""
@@ -428,10 +460,7 @@ def caption_job(job, name, note):
     folder, frames = extract_frames(path)
     frame_text = ("First use the Read tool on these frames of the clip, in order of time:\n"
                   + "\n".join(str(f) for f in frames)) if frames else "No frames are available."
-    profile = config().get("profile", "").strip()
-    voice = Path.home() / ".claude/instagram/voice.md"
-    if voice.exists():
-        profile += "\n\n" + voice.read_text()[:4000]
+    profile = config().get("profile", "").strip()     # the channel profile from the Setup tab is the only voice source
     ig_caption = skill_text("ig-caption")
     prompt = CAPTION_PROMPT.format(ig_caption=ig_caption, ig_human=skill_text("ig-human"), frames=frame_text,
                                    note=note.strip() or "(no note)", name=name,
@@ -619,12 +648,42 @@ def ig_wait_publish(job, uid, cid):
     return {"id": mid, "url": link}
 
 
-def ig_upload_direct(job, path, caption):
-    """Facebook login: send the file from the Pi to Meta. No public link is necessary."""
+@contextlib.contextmanager
+def public_link(job, path):
+    """Open a temporary public link for a clip and its cover. Yield the base address. Close the link at the end.
+
+    The video is at <base>/clip.<ext> and the cover at <base>/cover.jpg. Both use the same secret token.
+    """
+    token = secrets.token_urlsafe(24)
+    public_tokens[token] = path
+    proc = None
+    try:
+        step(job, "Instagram: open a temporary public link for the clip")
+        proc, host = start_tunnel(job)
+        base = f"{host}/v/{token}"
+        url = f"{base}/clip{path.suffix.lower()}"
+        for _ in range(20):                       # wait until the link answers
+            # Ask a public DNS. The DNS of the Pi does not know the new name for some minutes.
+            code = subprocess.run(["curl", "-s", "-I", "-o", "/dev/null", "-w", "%{http_code}", "-m", "15",
+                                   "--doh-url", "https://1.1.1.1/dns-query", url], capture_output=True, text=True).stdout
+            if code == "200":
+                break
+            time.sleep(3)
+        else:
+            raise ApiError("The temporary public link did not answer in 60 seconds.")
+        yield base
+    finally:
+        public_tokens.pop(token, None)
+        if proc:
+            proc.terminate()
+
+
+def ig_upload_direct(job, path, caption, cover_url=None):
+    """Facebook login: send the file from the Pi to Meta. A public link is necessary only for the cover."""
     uid = ig_uid()
-    step(job, "Instagram: create the Reel container")
+    step(job, "Instagram: create the Reel container" + (" with the cover" if cover_url else ""))
     c = ig("POST", f"{uid}/media", json={"media_type": "REELS", "upload_type": "resumable", "caption": caption,
-                                         "share_to_feed": True})
+                                         "share_to_feed": True, **({"cover_url": cover_url} if cover_url else {})})
     step(job, "Instagram: upload the file")
     with open(path, "rb") as f:
         r = requests.post(c.get("uri") or f"https://rupload.facebook.com/ig-api-upload/v27.0/{c['id']}", data=f,
@@ -641,38 +700,36 @@ def ig_upload_direct(job, path, caption):
 
 def ig_upload(job, path, caption):
     c = config()
-    if c.get("ig_mode") == "fb":
-        try:
-            return ig_upload_direct(job, path, caption)
-        except ApiError as e:
-            if "rejected the video" in str(e) or "did not finish" in str(e):
-                raise
-            step(job, f"Instagram: the direct upload failed ({str(e)[:120]}). Try the public link.")
-    uid = c.get("ig_user_id") or ig_me().get("user_id")
-    token = secrets.token_urlsafe(24)
-    public_tokens[token] = path
-    proc = None
-    try:
-        step(job, "Instagram: open a temporary public link for the clip")
-        proc, base = start_tunnel(job)
-        url = f"{base}/v/{token}/clip{path.suffix.lower()}"
-        for _ in range(20):                       # wait until the link answers
-            # Ask a public DNS. The DNS of the Pi does not know the new name for some minutes.
-            code = subprocess.run(["curl", "-s", "-I", "-o", "/dev/null", "-w", "%{http_code}", "-m", "15",
-                                   "--doh-url", "https://1.1.1.1/dns-query", url], capture_output=True, text=True).stdout
-            if code == "200":
-                break
-            time.sleep(3)
-        else:
-            raise ApiError("The temporary public link did not answer in 60 seconds.")
-        step(job, "Instagram: create the Reel container")
-        cid = ig("POST", f"{uid}/media", json={"media_type": "REELS", "video_url": url, "caption": caption,
-                                               "share_to_feed": True})["id"]
+    cover = cover_path(path)
+    with contextlib.ExitStack() as stack:
+        base = None
+
+        def link():                               # open the public link one time, and keep it to the end
+            nonlocal base
+            if base is None:
+                base = stack.enter_context(public_link(job, path))
+            return base
+
+        if c.get("ig_mode") == "fb":
+            cover_url = None
+            if cover:
+                try:
+                    cover_url = link() + "/cover.jpg"
+                except ApiError as e:
+                    step(job, f"Instagram: warning, no public link for the cover ({e}). Upload without the cover.")
+            try:
+                return ig_upload_direct(job, path, caption, cover_url)
+            except ApiError as e:
+                if "rejected the video" in str(e) or "did not finish" in str(e):
+                    raise
+                step(job, f"Instagram: the direct upload failed ({str(e)[:120]}). Try the public link.")
+        uid = c.get("ig_user_id") or ig_me().get("user_id")
+        b = link()
+        step(job, "Instagram: create the Reel container" + (" with the cover" if cover else ""))
+        cid = ig("POST", f"{uid}/media", json={"media_type": "REELS", "video_url": f"{b}/clip{path.suffix.lower()}",
+                                               "caption": caption, "share_to_feed": True,
+                                               **({"cover_url": f"{b}/cover.jpg"} if cover else {})})["id"]
         return ig_wait_publish(job, uid, cid)
-    finally:
-        public_tokens.pop(token, None)
-        if proc:
-            proc.terminate()
 
 
 def ig_analytics():
@@ -805,7 +862,31 @@ def yt_upload(job, path, title, description, privacy):
     if out["privacy"] != privacy:
         out["note"] = (f"YouTube set the video to {out['privacy']}. An API project without an audit "
                        "cannot publish. Change the visibility in YouTube Studio.")
+    yt_set_thumbnail(job, vid, path)
     return out
+
+
+def yt_set_thumbnail(job, vid, path):
+    """Try to set the cover X.jpg as the thumbnail. A failure is only a warning: the video is uploaded."""
+    cover = cover_path(path)
+    if not cover:
+        return
+    step(job, "YouTube: set the cover as the thumbnail")
+    try:
+        r = requests.post("https://www.googleapis.com/upload/youtube/v3/thumbnails/set",
+                          params={"videoId": vid, "uploadType": "media"}, data=cover.read_bytes(), timeout=120,
+                          headers={"Authorization": f"Bearer {yt_access()}", "Content-Type": "image/jpeg"})
+        if r.status_code == 200:
+            step(job, "YouTube: the cover is the thumbnail. YouTube can still show a frame for a Short.")
+            return
+        try:
+            msg = r.json()["error"]["message"]
+        except (ValueError, KeyError, TypeError):
+            msg = r.text[:200]
+    except (requests.RequestException, ApiError, OSError) as e:
+        msg = str(e)
+    step(job, f"YouTube: warning, the thumbnail is not set ({msg[:200]}). The video is uploaded.")
+    print(f"warning: thumbnails.set failed for {vid}: {msg[:300]}", flush=True)
 
 
 def iso_seconds(d):
@@ -913,9 +994,12 @@ def upload_job(job, name, body):
             dest = POSTED / name
             if dest.exists():
                 dest = POSTED / f"{int(time.time())}-{name}"
+            cover = cover_path(path)
             shutil.move(str(path), str(dest))
+            if cover:
+                shutil.move(str(cover), str(dest.with_suffix(".jpg")))
             s["history"][0]["file"] = dest.name
-            step(job, "Move the clip to the posted folder")
+            step(job, "Move the clip to the posted folder" + (" with its cover" if cover else ""))
         save("state.json", s)
     cache.pop("analytics", None)
     if errors and not results:
@@ -1224,14 +1308,16 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class PublicHandler(Handler):
-    """Serves one clip under a secret token, only while an Instagram upload is in progress."""
+    """Serves one clip and its cover under a secret token, only while an Instagram upload is in progress."""
 
     def do_GET(self):
-        m = re.fullmatch(r"/v/([\w-]+)/clip\.\w+", urllib.parse.urlparse(self.path).path)
+        m = re.fullmatch(r"/v/([\w-]+)/(clip\.\w+|cover\.jpg)", urllib.parse.urlparse(self.path).path)
         p = public_tokens.get(m.group(1)) if m else None
+        if p and m.group(2) == "cover.jpg":
+            p = cover_path(p)                     # only the cover of the clip of this token
         if not p or not p.is_file():
             return self.send_json({"error": "not found"}, 404)
-        self.send_file(p)
+        self.send_file(p, ctype="image/jpeg" if m.group(2) == "cover.jpg" else None)
 
     def do_POST(self):
         self.send_json({"error": "not found"}, 404)
