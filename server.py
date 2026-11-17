@@ -105,18 +105,38 @@ def clip_path(name):
 probe_cache = load("probe.json", {})      # "name|mtime|size" -> ffprobe result, kept across restarts
 
 
+def short_meta(tags):
+    """Read the record that the clipping tool puts in the MP4 tags. Return (title, text for the note field)."""
+    tags = {k.lower(): v for k, v in (tags or {}).items()}
+    try:
+        meta = json.loads(tags.get("comment", ""))
+    except ValueError:
+        return "", ""
+    if not isinstance(meta, dict) or meta.get("schema") != "clipping.short/1":
+        return "", ""
+    summary = str(meta.get("summary") or tags.get("description") or "").strip()
+    lines = [summary] if summary else []
+    groups = [str(g) for g in meta.get("groups") or [] if g and str(g) not in summary]
+    if groups:
+        lines.append("Opponent: " + ", ".join(groups) + ".")
+    if meta.get("transcript"):
+        lines.append("Speech in the clip: " + str(meta["transcript"]).strip()[:1200])
+    return str(meta.get("title") or tags.get("title") or "")[:200], "\n".join(lines)[:2000]
+
+
 def probe(path):
     st = path.stat()
     key = f"{path.name}|{st.st_mtime}|{st.st_size}"
     if key in probe_cache:
         return probe_cache[key]
-    info = {"duration": 0, "width": 0, "height": 0, "vcodec": "", "acodec": ""}
+    info = {"duration": 0, "width": 0, "height": 0, "vcodec": "", "acodec": "", "meta_title": "", "meta_note": ""}
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)],
             capture_output=True, text=True, timeout=60).stdout
         j = json.loads(out)
         info["duration"] = float(j.get("format", {}).get("duration", 0) or 0)
+        info["meta_title"], info["meta_note"] = short_meta(j.get("format", {}).get("tags", {}))
         for s in j.get("streams", []):
             if s.get("codec_type") == "video" and not info["width"]:
                 w, h = int(s.get("width", 0)), int(s.get("height", 0))
@@ -227,6 +247,27 @@ def delete_posted(name):
     return size
 
 
+def delete_inbox(name):
+    """Delete a clip that is not uploaded. Only a file in the inbox is permitted, and no job can use it."""
+    if not name or name != os.path.basename(name) or name.startswith("."):
+        raise ApiError("Bad file name.")
+    f = INBOX / name
+    if not f.is_file() or f.suffix.lower() not in VIDEO_EXT:
+        raise ApiError("The clip is not in the inbox.")
+    if any(j["state"] == "running" and j.get("clip") == name for j in jobs.values()):
+        raise ApiError("A caption job or an upload uses this clip. Wait until it is complete.")
+    t = DATA / "thumbs" / (hashlib.sha1(f"{f.name}{f.stat().st_mtime}".encode()).hexdigest()[:16] + ".jpg")
+    size = f.stat().st_size
+    f.unlink()
+    t.unlink(missing_ok=True)
+    with lock:
+        st = state()
+        if st["drafts"].pop(name, None) is not None:
+            save("state.json", st)
+    print(f"deleted the inbox clip {name} ({size} bytes)", flush=True)
+    return size
+
+
 def thumb(path):
     h = hashlib.sha1(f"{path.name}{path.stat().st_mtime}".encode()).hexdigest()[:16]
     t = DATA / "thumbs" / f"{h}.jpg"
@@ -267,8 +308,9 @@ def humanize(text):
     return out.strip() if out and out.strip() else text.strip()
 
 
-def lint(text):
-    out = skill_tool("ig-caption/caption.py", text, "--json")
+def lint(text, keywords=()):
+    kw = ",".join(k.replace(",", " ").strip() for k in keywords if k.strip())
+    out = skill_tool("ig-caption/caption.py", text, "--json", *(["--keywords", kw] if kw else []))
     try:
         j = json.loads(out)
         return {"verdict": j["verdict"], "characters": j["characters"], "visible": j["visible"],
@@ -277,9 +319,38 @@ def lint(text):
         return None
 
 
-CAPTION_PROMPT = """You are the social media manager of a short-form video channel.
-Write the text for ONE vertical clip that goes out as an Instagram Reel and as a YouTube Short.
+SKILLS = Path.home() / ".claude/skills"      # the pack github.com/Jakeschincariol/instagram-agent-skill
 
+
+def skill_text(name):
+    """The instructions of one skill of the Instagram pack, without the front matter. Read at each run."""
+    try:
+        text = (SKILLS / name / "SKILL.md").read_text()
+    except OSError:
+        raise ApiError(f"The skill {name} is not installed in {SKILLS}. The captions need it.") from None
+    return re.sub(r"\A---\n.*?\n---\n", "", text, count=1, flags=re.S).strip()
+
+
+CAPTION_PROMPT = """Write the text for ONE vertical gameplay clip that goes out as an Instagram Reel and as a YouTube Short.
+Follow the skill `ig-caption` below for the Instagram caption. It is the authority for the caption.
+
+<skill name="ig-caption">
+{ig_caption}
+</skill>
+
+<skill name="ig-human">
+{ig_human}
+</skill>
+
+How to apply the skills in this run:
+- This is a Reel, so the caption has Job A. Do not ask which job it is.
+- Do not run `caption.py`, `humanize.py` or `detect.py`. The dashboard runs them on your answer and shows the result.
+  Write text that passes them: follow each rule of the two skills now.
+- Do not ask the creator for the search terms. Select 2 or 3 from the clip data and the channel profile, and use
+  each one as a normal phrase in the caption. Return them in `keywords`.
+- Do not print the receipt or the copy-ready block. Reply with the JSON object only.
+
+The clip:
 {frames}
 What the creator says about the clip: {note}
 Clip length: {duration:.0f} seconds. File name: {name}
@@ -288,21 +359,28 @@ Channel profile (ignore empty fields):
 {profile}
 
 Write 3 different options. Each option uses a different angle (for example: curiosity, direct value, story).
-
-Rules for `ig_caption` (from the ig-caption skill):
-- The video carries the hook. Line 1 of the caption is the ask or the context, in 125 characters or fewer.
-- Line 1 does not start with a greeting, a hashtag or an emoji. Put a number or a name in it when the clip gives one.
-- Then 1 to 3 short paragraphs with a blank line between them. Put search phrases in normal sentences.
-- Exactly one call to action in the whole caption (comment a keyword, or save, or follow, never two).
-- No link. A maximum of 5 specific hashtags on the last line. Never #viral, #fyp, #reels, #explore.
-- A maximum of 2 emoji. Total length below 600 characters.
 Rules for `yt_title`: 70 characters or fewer, specific, no clickbait that the clip does not deliver, no hashtags.
-Rules for `yt_description`: 1 or 2 plain sentences with the search phrases, then a line with 3 hashtags.
-Rules for all text: sound like a person. No em dashes. No "game-changer", "unlock", "dive in", "elevate".
+Rules for `yt_description`: 1 or 2 plain sentences with the search terms, then a line with 3 hashtags.
+The skill `ig-human` applies to all three texts.
 Do not invent facts, numbers or names that the frames and the creator's note do not show.
 
 Reply with ONLY a JSON object, no code fence, in this shape:
-{{"options":[{{"angle":"two or three words","ig_caption":"...","yt_title":"...","yt_description":"..."}}]}}"""
+{{"options":[{{"angle":"two or three words","keywords":["term","term"],"ig_caption":"...","yt_title":"...","yt_description":"..."}}]}}"""
+
+REPAIR_PROMPT = """You wrote Instagram captions with the skill `ig-caption`. The linter `caption.py` of the skill
+found a FAIL in some of them. The skill says: fix every FAIL.
+
+<skill name="ig-caption">
+{ig_caption}
+</skill>
+
+The captions with their linter result:
+{items}
+
+Write each caption again so that the linter passes. Keep the angle, the facts and the search terms.
+Do not invent facts. Do not use tools.
+Reply with ONLY a JSON object, no code fence, in this shape:
+{{"fixed":[{{"index":0,"ig_caption":"..."}}]}}"""
 
 
 def extract_frames(path):
@@ -318,6 +396,32 @@ def extract_frames(path):
     return d, frames
 
 
+def ask_sonnet(prompt, folder):
+    """Run one Claude call with the Sonnet model. Refuse the answer if a different model made a part of it."""
+    r = subprocess.run([CLAUDE, "-p", prompt, "--model", "sonnet", "--allowedTools", "Read", "--output-format", "json"],
+                       cwd=folder, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+    try:
+        out = json.loads(r.stdout)
+    except ValueError:
+        raise ApiError(f"Claude gave no options. {(r.stderr or r.stdout)[-300:]}") from None
+    if r.returncode != 0 or out.get("is_error"):
+        raise ApiError(f"Claude gave no options. {str(out.get('result') or r.stderr)[-300:]}")
+    models = sorted(out.get("modelUsage") or {})
+    if not models or any("sonnet" not in m for m in models):
+        raise ApiError(f"The captions did not come from Sonnet only (models: {', '.join(models) or 'unknown'}). They are not used.")
+    return str(out.get("result", "")).strip(), models
+
+
+def answer_json(text):
+    """The JSON object in an answer of Claude, or an empty object."""
+    m = re.search(r"\{.*\}", text, re.S)
+    try:
+        out = json.loads(m.group(0)) if m else {}
+    except ValueError:
+        out = {}
+    return out if isinstance(out, dict) else {}
+
+
 def caption_job(job, name, note):
     path = clip_path(name)
     step(job, "Read 4 frames of the clip")
@@ -328,22 +432,47 @@ def caption_job(job, name, note):
     voice = Path.home() / ".claude/instagram/voice.md"
     if voice.exists():
         profile += "\n\n" + voice.read_text()[:4000]
-    prompt = CAPTION_PROMPT.format(frames=frame_text, note=note.strip() or "(no note)", name=name,
+    ig_caption = skill_text("ig-caption")
+    prompt = CAPTION_PROMPT.format(ig_caption=ig_caption, ig_human=skill_text("ig-human"), frames=frame_text,
+                                   note=note.strip() or "(no note)", name=name,
                                    duration=probe(path)["duration"], profile=profile.strip() or "(empty)")
-    step(job, "Ask Claude for 3 options (30 to 90 seconds)")
-    r = subprocess.run([CLAUDE, "-p", prompt, "--model", "sonnet", "--allowedTools", "Read"],
-                       cwd=folder, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
-    text = r.stdout.strip()
-    m = re.search(r"\{.*\}", text, re.S)
-    if r.returncode != 0 or not m:
-        raise ApiError(f"Claude gave no options. {(r.stderr or text)[-300:]}")
-    options = json.loads(m.group(0))["options"][:3]
-    step(job, "Clean the text and run the caption linter")
-    for o in options:
+    step(job, "Ask Claude for 3 options with the skill ig-caption (30 to 90 seconds)")
+    text, models = ask_sonnet(prompt, folder)
+    step(job, "Model: " + ", ".join(models))
+    options = [o for o in answer_json(text).get("options", []) if isinstance(o, dict)][:3]
+    if not options:
+        raise ApiError(f"Claude gave no options. {text[-300:]}")
+
+    def finish(o):
         for k in ("ig_caption", "yt_title", "yt_description"):
             o[k] = humanize(str(o.get(k, "")))
         o["yt_title"] = o["yt_title"][:100]
-        o["lint"] = lint(o["ig_caption"])
+        o["keywords"] = [str(k)[:60] for k in o.get("keywords") or [] if isinstance(k, str)][:3]
+        o["lint"] = lint(o["ig_caption"], o["keywords"])
+
+    def fails(o):
+        return [c for c in (o["lint"] or {}).get("checks", []) if c["status"] == "FAIL"]
+
+    step(job, "Clean the text with ig-human and run the caption linter")
+    for o in options:
+        finish(o)
+    bad = [i for i, o in enumerate(options) if fails(o)]
+    if bad:                                   # the skill: fix every FAIL. One more call, not a loop.
+        step(job, f"The linter found a FAIL in {len(bad)} of {len(options)} options. Ask Claude to fix them")
+        items = "\n\n".join(
+            f"index {i}, search terms: {', '.join(options[i]['keywords']) or 'none'}\n<caption>\n{options[i]['ig_caption']}\n</caption>\n"
+            + "\n".join(f"FAIL {c['check']}: {c['detail']}" for c in fails(options[i])) for i in bad)
+        try:
+            text, _ = ask_sonnet(REPAIR_PROMPT.format(ig_caption=ig_caption, items=items), folder)
+            for f in answer_json(text).get("fixed", []):
+                i = f.get("index") if isinstance(f, dict) else None
+                if i in bad and str(f.get("ig_caption", "")).strip():
+                    options[i]["ig_caption"] = str(f["ig_caption"])
+                    finish(options[i])
+        except ApiError as e:
+            step(job, f"The fix did not work ({e}). The first text stays.")
+        left = sum(1 for o in options if fails(o))
+        step(job, "The linter passes all options." if not left else f"{left} options still have a FAIL. Edit them before the upload.")
     with lock:
         s = state()
         dr = s["drafts"].setdefault(name, {})
@@ -405,7 +534,8 @@ def fb_connect(tok):
     if not accounts:
         why = first_error or r.get("error", {}).get("message") or "the token is valid, but no Instagram account is assigned to it"
         raise ApiError(f"Instagram: {why}. In the Meta app, add the Instagram account as a tester, accept the "
-                       "invite in Instagram, and generate the token again with the permission instagram_basic.")
+                       "invite in Instagram, and generate the token again with the permissions instagram_basic, instagram_content_publish and "
+                       "instagram_manage_insights.")
     acct = accounts[0]
     note = "The life of this token is set in the configuration of the Meta app."
     if config().get("fb_app_id") and config().get("fb_app_secret"):
@@ -549,11 +679,14 @@ def ig_analytics():
     me = ig_me()
     media = ig("GET", f"{ig_uid()}/media", params={
         "fields": "id,caption,media_product_type,permalink,timestamp,like_count,comments_count", "limit": 15})
-    rows = []
+    rows, warning = [], None
     for m in media.get("data", []):
         row = {"id": m["id"], "title": (m.get("caption") or "(no caption)").split("\n")[0][:80],
                "url": m.get("permalink"), "date": m.get("timestamp", "")[:10], "type": m.get("media_product_type"),
                "likes": m.get("like_count"), "comments": m.get("comments_count")}
+        rows.append(row)
+        if warning and "permission" in warning:
+            continue                          # the token cannot read insights. Do not ask again for each post.
         metrics = "views,reach,saved,shares,total_interactions"
         if m.get("media_product_type") == "REELS":
             metrics += ",ig_reels_avg_watch_time"
@@ -563,9 +696,15 @@ def ig_analytics():
                 row[d["name"]] = (d.get("values") or [{}])[0].get("value")
         except ApiError as e:
             row["note"] = str(e)[:120]
-        rows.append(row)
+            warning = warning or str(e)
+    if warning and "(#10)" in warning:
+        warning = ("Instagram does not give the views, reach, saves or shares: the token does not have the "
+                   "permission instagram_manage_insights. Generate the token again with this permission "
+                   "(Setup, step 'Configure your app') and paste it on the Setup tab.")
+    elif warning:
+        warning = "Instagram did not give the insights of some posts. " + warning
     return {"account": {"name": me.get("username"), "followers": me.get("followers_count"),
-                        "posts": me.get("media_count")}, "rows": rows}
+                        "posts": me.get("media_count")}, "rows": rows, "warning": warning}
 
 
 # ---------------------------------------------------------------- YouTube
@@ -731,7 +870,8 @@ def step(job, text, replace=None):
 
 def run_job(kind, fn, *args):
     jid = secrets.token_hex(6)
-    job = jobs[jid] = {"id": jid, "kind": kind, "state": "running", "steps": [], "time": time.time()}
+    job = jobs[jid] = {"id": jid, "kind": kind, "state": "running", "steps": [], "time": time.time(),
+                       "clip": args[0] if args else None}
 
     def work():
         try:
@@ -1000,6 +1140,8 @@ class Handler(BaseHTTPRequestHandler):
             name = body.get("clip")
             if path in ("/api/captions", "/api/draft", "/api/upload") and not clip_path(name):
                 raise ApiError("The clip is not in the folder.")
+            if path == "/api/clips/delete":
+                return self.send_json({"ok": True, "freed": delete_inbox(str(body.get("file", "")))})
             if path == "/api/posted/delete":
                 return self.send_json({"ok": True, "freed": delete_posted(str(body.get("file", "")))})
             if path == "/api/captions":

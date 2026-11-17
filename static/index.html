@@ -284,7 +284,7 @@ function clipCard(c, i) {
   const d = c.draft || {};
   const st = { options: d.options || [], selected: d.selected ?? null };
   const note = h('textarea', { rows: 2, placeholder: 'Example: 40 km ride to the Coorg viewpoint before sunrise. The fog clears at the end.' });
-  note.value = d.note || '';
+  note.value = d.note || c.meta_note || '';   // no draft note: use the record in the MP4 tags
   const optBox = h('div', { class: 'opts' });
   const igc = h('textarea', { rows: 7 }), ytt = h('input', { type: 'text', maxlength: 100 }), ytd = h('textarea', { rows: 3 });
   igc.value = d.ig_caption || ''; ytt.value = d.yt_title || ''; ytd.value = d.yt_description || '';
@@ -374,10 +374,27 @@ function clipCard(c, i) {
   renderOpts();
   if (st.selected !== null) { editor.hidden = false; relint(); }
   gate();
+  const del = h('button', { class: 'btn del', type: 'button', 'aria-label': 'Delete ' + c.name + ' without an upload' }, 'Delete clip');
+  const delMsg = h('span', { class: 'muted', role: 'status' });
+  let armed = null;
+  del.onclick = async () => {
+    if (busy) { delMsg.textContent = 'Wait until the job is complete.'; return; }
+    if (!armed) {                          // the first click arms the button, the second click deletes
+      del.textContent = 'Confirm delete'; del.classList.add('armed');
+      armed = setTimeout(() => { armed = null; del.textContent = 'Delete clip'; del.classList.remove('armed'); }, 5000);
+      return;
+    }
+    clearTimeout(armed); armed = null; del.disabled = true;
+    try {
+      await api('/api/clips/delete', { file: c.name });
+      say('The clip ' + c.name + ' is deleted.');
+      del.closest('article').remove();
+    } catch (e) { del.disabled = false; del.textContent = 'Delete clip'; del.classList.remove('armed'); delMsg.textContent = e.message; }
+  };
   return h('article', { class: 'clip', style: `--i:${i}` },
     view,
     h('div', {},
-      h('h2', {}, c.name),
+      h('h2', {}, c.name), c.meta_title ? h('div', { class: 'muted' }, c.meta_title) : null,
       h('div', { class: 'meta' }, `${dur(c.duration)} · ${c.width}×${c.height} · ${(c.size / 1e6).toFixed(1)} MB · ${c.vcodec || '?'}`),
       h('ul', { class: 'checks' }, c.checks.map(k => h('li', { class: k.level }, k.text))),
       h('div', { class: 'stepno' }, '1 · Tell Claude about the clip'),
@@ -387,7 +404,8 @@ function clipCard(c, i) {
       h('div', { class: 'stepno' }, '3 · Upload'),
       h('div', { class: 'row' }, igLab, ytLab, h('label', {}, 'YouTube visibility ', priv)),
       h('div', { class: 'row', style: 'margin-top:12px' }, upBtn, upHint),
-      bar, log));
+      bar, log,
+      h('div', { class: 'row', style: 'margin-top:18px' }, del, h('span', { class: 'muted' }, 'Removes the file from the Pi. The clip is not uploaded.'), delMsg)));
 }
 
 async function loadHistory() {
@@ -450,7 +468,7 @@ function platformBlock(title, color, p, cols) {
   const tiles = [['Account', a.name], [title === 'YouTube' ? 'Subscribers' : 'Followers', num(a.followers)], ['Posts', num(a.posts)]];
   if (a.views != null) tiles.push(['Channel views', num(a.views)]);
   tiles.push([`Views, last ${rows.length} posts`, num(rows.reduce((s, r) => s + (r.views || 0), 0))]);
-  return [h('h2', {}, title),
+  return [h('h2', {}, title), ...(p.warning ? [h('p', { class: 'note' }, p.warning)] : []),
     h('div', { class: 'tiles' }, tiles.map(([k, v]) => h('div', { class: 'tile' }, h('div', { class: 'k' }, k), h('div', { class: 'v', style: String(v).length > 9 ? 'font-size:24px' : '' }, v)))),
     h('div', { class: 'panel' },
       h('h3', { style: 'margin-top:0' }, 'Views for each post, newest first'),
