@@ -678,57 +678,19 @@ def public_link(job, path):
             proc.terminate()
 
 
-def ig_upload_direct(job, path, caption, cover_url=None):
-    """Facebook login: send the file from the Pi to Meta. A public link is necessary only for the cover."""
-    uid = ig_uid()
-    step(job, "Instagram: create the Reel container" + (" with the cover" if cover_url else ""))
-    c = ig("POST", f"{uid}/media", json={"media_type": "REELS", "upload_type": "resumable", "caption": caption,
-                                         "share_to_feed": True, **({"cover_url": cover_url} if cover_url else {})})
-    step(job, "Instagram: upload the file")
-    with open(path, "rb") as f:
-        r = requests.post(c.get("uri") or f"https://rupload.facebook.com/ig-api-upload/v27.0/{c['id']}", data=f,
-                          timeout=1800, headers={"Authorization": f"OAuth {ig_token()}", "offset": "0",
-                                                 "file_size": str(path.stat().st_size)})
-    try:
-        ok = r.json().get("success")
-    except ValueError:
-        ok = False
-    if not ok:
-        raise ApiError(f"Instagram refused the file: {r.text[:200]}")
-    return ig_wait_publish(job, uid, c["id"])
-
-
 def ig_upload(job, path, caption):
+    """Instagram reads the video (and the cover, if it exists) from a temporary public link.
+
+    The direct upload to rupload.facebook.com always failed for this account, so the server does not try it.
+    """
     c = config()
     cover = cover_path(path)
-    with contextlib.ExitStack() as stack:
-        base = None
-
-        def link():                               # open the public link one time, and keep it to the end
-            nonlocal base
-            if base is None:
-                base = stack.enter_context(public_link(job, path))
-            return base
-
-        if c.get("ig_mode") == "fb":
-            cover_url = None
-            if cover:
-                try:
-                    cover_url = link() + "/cover.jpg"
-                except ApiError as e:
-                    step(job, f"Instagram: warning, no public link for the cover ({e}). Upload without the cover.")
-            try:
-                return ig_upload_direct(job, path, caption, cover_url)
-            except ApiError as e:
-                if "rejected the video" in str(e) or "did not finish" in str(e):
-                    raise
-                step(job, f"Instagram: the direct upload failed ({str(e)[:120]}). Try the public link.")
-        uid = c.get("ig_user_id") or ig_me().get("user_id")
-        b = link()
+    uid = c.get("ig_user_id") or ig_me().get("user_id")
+    with public_link(job, path) as base:
         step(job, "Instagram: create the Reel container" + (" with the cover" if cover else ""))
-        cid = ig("POST", f"{uid}/media", json={"media_type": "REELS", "video_url": f"{b}/clip{path.suffix.lower()}",
+        cid = ig("POST", f"{uid}/media", json={"media_type": "REELS", "video_url": f"{base}/clip{path.suffix.lower()}",
                                                "caption": caption, "share_to_feed": True,
-                                               **({"cover_url": f"{b}/cover.jpg"} if cover else {})})["id"]
+                                               **({"cover_url": f"{base}/cover.jpg"} if cover else {})})["id"]
         return ig_wait_publish(job, uid, cid)
 
 

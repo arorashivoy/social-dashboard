@@ -20,6 +20,7 @@ A dashboard on the Raspberry Pi that publishes a clip as an Instagram Reel and a
 - **Instagram:** Instagram API with Instagram login (`graph.instagram.com`). This API reads the video from a public
   address. During the upload the server opens a Cloudflare quick tunnel to port 8098. That port serves only the one
   clip, under a random token. The tunnel closes when the Reel is published.
+  The server always uses this public link. The direct upload to `rupload.facebook.com` always failed, so it is removed.
 
 The steps for the Instagram token and the YouTube client are on the **Setup** tab.
 
@@ -30,8 +31,7 @@ The pairing by file name is the rule. The block `thumbnail` in the MP4 record is
 
 - **Preview:** the inbox and the Uploaded tab show the cover. If there is no cover, they show a frame of the clip.
 - **Instagram:** the server sends the cover as `cover_url` in the REELS container. The tunnel serves the cover at
-  `/v/<token>/cover.jpg`, with the same token as the clip. With the Facebook login, the server opens the tunnel
-  only when a cover exists. If the tunnel does not start, the Reel goes out without the cover.
+  `/v/<token>/cover.jpg`, with the same token as the clip.
 - **YouTube:** after the upload, the server tries `thumbnails.set`. If YouTube refuses it (for example, the channel
   is not verified), the job shows a warning and the upload stays complete.
 - **Files:** the cover moves to `posted/` with the clip, and a delete removes the cover too. A `.jpg` alone is
