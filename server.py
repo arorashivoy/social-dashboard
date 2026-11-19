@@ -16,10 +16,12 @@ import re
 import secrets
 import shutil
 import socket
+import statistics
 import subprocess
 import threading
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -343,10 +345,41 @@ def lint(text, keywords=()):
     out = skill_tool("ig-caption/caption.py", text, "--json", *(["--keywords", kw] if kw else []))
     try:
         j = json.loads(out)
-        return {"verdict": j["verdict"], "characters": j["characters"], "visible": j["visible"],
-                "checks": [c for c in j["checks"] if c["status"] != "PASS"]}
+        out = {"verdict": j["verdict"], "characters": j["characters"], "visible": j["visible"],
+               "checks": [c for c in j["checks"] if c["status"] != "PASS"]}
     except (TypeError, ValueError, KeyError):
         return None
+    hook = hook_score(text)
+    if hook:
+        out["hook_score"] = hook["score"]
+        out["checks"].insert(0, hook)
+        if hook["status"] == "FAIL":
+            out["verdict"] = "FIX"
+        elif hook["status"] == "WARN" and out["verdict"] == "READY":
+            out["verdict"] = "REVIEW"
+    return out
+
+
+def hook_score(text):
+    """Score line 1 of the caption with hookscore.py of the skill ig-reel. Below 35 is a FAIL, below 55 a WARN.
+
+    The score is a weak signal. On gaming Shorts the top third and the bottom third of the ig-viral swipe file had
+    the same median score, so only a very low score (a greeting, a hook with nothing in it) fails.
+    """
+    line = next((x.strip() for x in text.splitlines() if x.strip()), "")
+    if not line:
+        return None
+    try:
+        j = json.loads(skill_tool("ig-reel/hookscore.py", line, "--json") or "")
+        if isinstance(j, list):
+            j = j[0]
+        score, weakest = float(j["score"]), j.get("weakest", "")
+        why = j["checks"][weakest]["detail"] if weakest in j.get("checks", {}) else ""
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+    status = "FAIL" if score < 35 else "WARN" if score < 55 else "PASS"
+    return {"check": "HOOK SCORE", "status": status, "score": score,
+            "detail": f"{score:.0f}/100" + (f", weakest: {weakest.lower()} ({why})" if status != "PASS" and weakest else "")}
 
 
 SKILLS = Path.home() / ".claude/skills"      # the pack github.com/Jakeschincariol/instagram-agent-skill
@@ -372,7 +405,19 @@ Follow the skill `ig-caption` below for the Instagram caption. It is the authori
 {ig_human}
 </skill>
 
+<skill name="ig-viral">
+{ig_viral}
+</skill>
+
 How to apply the skills in this run:
+- ig-viral: the dashboard did steps 1 to 3 with the YouTube Data API and `swipe.py`. The result is the SWIPE FILE
+  below the channel profile. Do not browse and do not ask for accounts. Do step 4 in your head, and do step 5 in
+  the 3 options: each option is my version of one shape that works in the top third of the swipe file (a numbered
+  formula that over-indexes, or a shape that repeats in the unclassified top hooks), with the facts of this clip.
+  Put the formula or the shape in `angle`. If the confidence is LOW or there is no data, use the hook formulas of
+  the channel profile for at least 2 options. Hashtags come from the swipe file as the profile says.
+- The dashboard scores each hook with `hookscore.py`. It is a weak signal. If the swipe file and the score disagree,
+  follow the swipe file, but never write a hook with no name in it.
 - The channel profile below sets the order of the caption: line 1 is the hook, and the ask comes after it.
   Where the profile and the skill differ, follow the profile. Do not ask which job it is.
 - Do not run `caption.py`, `humanize.py` or `detect.py`. The dashboard runs them on your answer and shows the result.
@@ -388,6 +433,8 @@ Clip length: {duration:.0f} seconds. File name: {name}
 
 Channel profile (ignore empty fields):
 {profile}
+
+{trends}
 
 Write 3 different options. Each option uses a different angle (for example: curiosity, direct value, story).
 Rules for `yt_title`: 70 characters or fewer, specific, no clickbait that the clip does not deliver, no hashtags.
@@ -409,6 +456,9 @@ The captions with their linter result:
 {items}
 
 Write each caption again so that the linter passes. Keep the angle, the facts and the search terms.
+A FAIL of HOOK SCORE means that line 1 (the hook) has almost nothing in it. Write a new hook: 90 characters or
+fewer, with the game and the boss, item or stage in the first words, and keep the hook shape of the option.
+Do not make the hook self-mocking.
 Keep the order: the hook is line 1, and the ask comes after the hook. Never move the ask into line 1.
 Do not invent facts. Do not use tools.
 Reply with ONLY a JSON object, no code fence, in this shape:
@@ -454,6 +504,144 @@ def answer_json(text):
     return out if isinstance(out, dict) else {}
 
 
+GAMES = {"elden ring": "Elden Ring", "eldenring": "Elden Ring", "wrc": "WRC", "gta 6": "GTA 6", "gta6": "GTA 6",
+         "gta vi": "GTA 6", "malenia": "Elden Ring", "furnace golem": "Elden Ring"}
+TREND_QUERY = {"WRC": "EA Sports WRC"}           # "WRC" alone finds the real rally series
+TREND_TTL = 86400                                # one YouTube search for each game each day (100 quota units)
+FILLER = {"#shorts", "#short", "#viral", "#viralshorts", "#trending", "#fyp", "#foryou", "#subscribe", "#youtubeshorts",
+          "#shortsfeed", "#explore", "#memes", "#meme", "#funny", "#xuhuongyoutube", "#ytshorts", "#like"}
+
+
+MIN_BASELINE = 1000      # the smallest channel median that the outlier multiple divides by
+NOT_ENGLISH = {"de", "os", "mais", "do", "da", "que", "el", "los", "las", "para", "com", "con", "una", "um", "uma",
+               "en", "del", "na", "no", "der", "die", "und", "le", "les", "des", "est", "ist", "y", "e"}
+
+
+def game_of(path):
+    """The game of a clip, from the file name or the record of the clipping tool. None if it is not known."""
+    for text in (path.stem, probe(path).get("meta_title", "")):
+        low = re.sub(r"[-_]+", " ", text.lower())
+        for k, g in GAMES.items():
+            if re.search(rf"\b{re.escape(k)}\b", low):
+                return g
+    return None
+
+
+def channel_median(ch):
+    """The median views of the last 12 Shorts (3 minutes or less) of one channel. The baseline of ig-viral."""
+    items = yt("playlistItems", part="contentDetails", playlistId=ch, maxResults=25).get("items", [])
+    ids = [i["contentDetails"]["videoId"] for i in items]
+    if not ids:
+        return None
+    vids = yt("videos", part="statistics,contentDetails", id=",".join(ids)).get("items", [])
+    views = [int(v["statistics"].get("viewCount", 0) or 0) for v in vids
+             if iso_seconds(v["contentDetails"].get("duration")) <= 180][:12]
+    return int(statistics.median(views)) if len(views) >= 3 else None
+
+
+def yt_trends(game):
+    """Steps 1 to 3 of the skill ig-viral, on YouTube Shorts of one game from the last 14 days.
+
+    The skill names YouTube Shorts as a legitimate corpus: view counts are public and no login is necessary.
+    Official YouTube Data API only. Instagram is never read: the skill forbids automated collection on Instagram,
+    and Meta restricted this account for automated activity before. About 300 quota units for each game each day.
+    """
+    trends = load("trends.json", {})
+    hit = trends.get(game)
+    if hit and hit.get("swipe") and time.time() - hit["time"] < TREND_TTL:
+        return hit
+    after = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 14 * 86400))
+    ids, page = [], None
+    for _ in range(2):                            # 2 pages of 50: the skill wants 40 or more for a claim
+        found = yt("search", part="snippet", q=f"{TREND_QUERY.get(game, game)} #shorts", type="video",
+                   videoDuration="short", order="viewCount", publishedAfter=after, maxResults=50,
+                   relevanceLanguage="en", **({"pageToken": page} if page else {}))
+        ids += [i["id"]["videoId"] for i in found.get("items", []) if i.get("id", {}).get("videoId")]
+        page = found.get("nextPageToken")
+        if not page:
+            break
+    videos = []
+    for k in range(0, len(ids), 50):
+        videos += yt("videos", part="snippet,statistics", id=",".join(ids[k:k + 50])).get("items", [])
+    rows = []
+    for v in videos:
+        title = html.unescape(v["snippet"]["title"])
+        lang = (v["snippet"].get("defaultAudioLanguage") or v["snippet"].get("defaultLanguage") or "en").lower()
+        foreign = sum(w in NOT_ENGLISH for w in re.findall(r"[a-z]+", title.lower()))
+        if not lang.startswith("en") or foreign >= 2 or any(ch.isalpha() and not ch.isascii() for ch in title):
+            continue                              # the captions are in English, so only English titles teach
+        tags = {t.lower() for t in re.findall(r"#\w+", title + " " + v["snippet"].get("description", ""))}
+        hook = re.sub(r"\s+", " ", re.sub(r"#\w+", "", title)).strip(" -|")
+        if hook:
+            rows.append({"channel": v["snippet"]["channelId"], "account": v["snippet"]["channelTitle"],
+                         "views": int(v["statistics"].get("viewCount", 0) or 0), "hook": hook, "tags": sorted(tags)})
+    chans, info = list({r["channel"] for r in rows}), {}
+    for k in range(0, len(chans), 50):
+        for c in yt("channels", part="statistics,contentDetails", id=",".join(chans[k:k + 50])).get("items", []):
+            info[c["id"]] = {"subs": int(c["statistics"].get("subscriberCount", 0) or 0),
+                             "uploads": c["contentDetails"]["relatedPlaylists"]["uploads"]}
+    with ThreadPoolExecutor(6) as pool:           # one small read for each channel, in parallel
+        medians = dict(zip(chans, pool.map(lambda ch: channel_median(info[ch]["uploads"]) if ch in info else None, chans)))
+    tsv = ["account\tfollowers\tmedian\tviews\thook"]
+    for r in rows:
+        r["subs"], r["median"] = info.get(r["channel"], {}).get("subs", 0), medians.get(r["channel"])
+        base = max(r["median"] or r["subs"] or 0, MIN_BASELINE)   # a median of 30 views is noise, not a baseline
+        tsv.append("\t".join([r["account"].replace("\t", " "), str(r["subs"]), str(base),
+                              str(r["views"]), r["hook"].replace("\t", " ")]))
+    try:
+        swipe = json.loads(skill_tool("ig-viral/swipe.py", "\n".join(tsv), "--json") or "")
+    except ValueError:
+        raise ApiError("The tool swipe.py of the skill ig-viral gave no result.") from None
+    by_hook = {(r["account"], r["hook"]): r for r in rows}
+    reels = []
+    for x in swipe["reels"]:
+        r = by_hook.get((x.get("account"), x.get("hook")), {})
+        reels.append({"account": x.get("account"), "hook": x["hook"], "views": x["views"], "baseline": x["baseline"],
+                      "multiple": x["outlier"], "formula_id": x["formula_id"], "formula": x["formula"],
+                      "hook_score": x["hook_score"], "words": x["words"], "channel": r.get("channel"),
+                      "tags": r.get("tags", [])})
+    count, seen = {}, set()
+    for r in reels[:max(1, len(reels) // 3)]:     # the top third
+        for t in r["tags"]:
+            if t not in FILLER and (r["channel"], t) not in seen:   # one vote for each channel, not each video
+                seen.add((r["channel"], t))
+                count[t] = count.get(t, 0) + 1
+    out = {"time": time.time(), "game": game, "videos": reels,
+           "swipe": {k: swipe[k] for k in ("baseline", "n", "accounts", "top_formulas", "top_hook_score",
+                                            "bottom_hook_score", "top_words", "bottom_words", "unclassified")},
+           "hashtags": sorted(count.items(), key=lambda x: -x[1])[:15]}
+    trends[game] = out
+    save("trends.json", trends)
+    return out
+
+
+def trend_text(t):
+    """The swipe file of ig-viral for the prompt: the ranked hooks, what over-indexes, and the confidence."""
+    if not t or not t.get("videos"):
+        return "SWIPE FILE: no data. Use the hook formulas of the channel profile."
+    sw, reels = t["swipe"], t["videos"]
+    third = max(1, len(reels) // 3)
+    strong = sw["n"] >= 40 and sw["accounts"] >= 6
+    lines = [f"SWIPE FILE (skill ig-viral, steps 1 to 3 done by the dashboard) for {t['game']}: {sw['n']} YouTube Shorts "
+             f"from the last 14 days, {sw['accounts']} channels, read on {time.strftime('%d %b %Y', time.localtime(t['time']))}. "
+             f"Baseline: {sw['baseline']}. Confidence: "
+             + ("enough to support a claim." if strong else "LOW, the sample is small. Treat it as a hint only."),
+             "", f"TOP THIRD ({third} Shorts), ranked by the outlier multiple:"]
+    for r in reels[:third]:
+        mult = f"{r['multiple']:.1f}x" if r["multiple"] else "?"
+        fid = f"#{r['formula_id']} {r['formula']}" if r["formula_id"] else "unclassified"
+        lines.append(f"- {mult} | hook {r['hook_score'] or 0:.0f} | {fid} | {r['views']:,} views | \"{r['hook']}\"")
+    lines += ["", "WHAT IS OVER-INDEXING",
+              "  top third by formula: " + (", ".join(f"{n} x{c}" for n, c in sw["top_formulas"][:5]) or "none"),
+              f"  median hook length: top {sw['top_words']} words vs bottom {sw['bottom_words']} words",
+              f"  median hook score: top {sw['top_hook_score']} vs bottom {sw['bottom_hook_score']}",
+              f"  unclassified: {sw['unclassified']} of {sw['n']}. Read the unclassified hooks of the top third by hand: "
+              "a shape that repeats there is a formula that is not in hooks.json yet.",
+              "", "Hashtags of the top third (number of channels that use it): "
+              + (", ".join(f"{k} {n}" for k, n in t["hashtags"]) or "none")]
+    return "\n".join(lines)
+
+
 def caption_job(job, name, note):
     path = clip_path(name)
     step(job, "Read 4 frames of the clip")
@@ -461,10 +649,22 @@ def caption_job(job, name, note):
     frame_text = ("First use the Read tool on these frames of the clip, in order of time:\n"
                   + "\n".join(str(f) for f in frames)) if frames else "No frames are available."
     profile = config().get("profile", "").strip()     # the channel profile from the Setup tab is the only voice source
+    game, trends = game_of(path), None
+    if game:
+        step(job, f"ig-viral: read what works now for {game} on YouTube Shorts (one search each day)")
+        try:
+            trends = yt_trends(game)
+            sw = trends["swipe"]
+            top = (trends["videos"][0]["multiple"] or 0) if trends["videos"] else 0
+            step(job, f"ig-viral: {sw['n']} Shorts from {sw['accounts']} channels, the best did {top:g}x its channel median")
+        except ApiError as e:
+            step(job, f"Trends: not available ({str(e)[:120]}). The captions use the profile only.")
     ig_caption = skill_text("ig-caption")
-    prompt = CAPTION_PROMPT.format(ig_caption=ig_caption, ig_human=skill_text("ig-human"), frames=frame_text,
+    prompt = CAPTION_PROMPT.format(ig_caption=ig_caption, ig_human=skill_text("ig-human"), ig_viral=skill_text("ig-viral"),
+                                   frames=frame_text,
                                    note=note.strip() or "(no note)", name=name,
-                                   duration=probe(path)["duration"], profile=profile.strip() or "(empty)")
+                                   duration=probe(path)["duration"], profile=profile.strip() or "(empty)",
+                                   trends=trend_text(trends))
     step(job, "Ask Claude for 3 options with the skill ig-caption (30 to 90 seconds)")
     text, models = ask_sonnet(prompt, folder)
     step(job, "Model: " + ", ".join(models))
@@ -502,6 +702,7 @@ def caption_job(job, name, note):
             step(job, f"The fix did not work ({e}). The first text stays.")
         left = sum(1 for o in options if fails(o))
         step(job, "The linter passes all options." if not left else f"{left} options still have a FAIL. Edit them before the upload.")
+    options.sort(key=lambda o: -((o["lint"] or {}).get("hook_score") or 0))     # the strongest hook first
     with lock:
         s = state()
         dr = s["drafts"].setdefault(name, {})
