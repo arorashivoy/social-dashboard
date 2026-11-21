@@ -895,12 +895,37 @@ def ig_upload(job, path, caption):
         return ig_wait_publish(job, uid, cid)
 
 
+IG_REEL_ROWS = 15          # the analytics table shows the newest 15 reels. The total counts all reels.
+
+
+def ig_all_media(limit=1000):
+    """All posts of the account, newest first, page by page."""
+    out, after = [], None
+    while len(out) < limit:
+        p = {"fields": "id,caption,media_product_type,permalink,timestamp,like_count,comments_count", "limit": 50}
+        if after:
+            p["after"] = after
+        j = ig("GET", f"{ig_uid()}/media", params=p)
+        out += j.get("data", [])
+        after = j.get("paging", {}).get("cursors", {}).get("after")
+        if not j.get("data") or not after or not j.get("paging", {}).get("next"):
+            break
+    return out
+
+
+def ig_views(media_id):
+    try:
+        ins = ig("GET", f"{media_id}/insights", params={"metric": "views"})
+        return (ins.get("data") or [{}])[0].get("values", [{}])[0].get("value")
+    except (ApiError, IndexError):
+        return None
+
+
 def ig_analytics():
     me = ig_me()
-    media = ig("GET", f"{ig_uid()}/media", params={
-        "fields": "id,caption,media_product_type,permalink,timestamp,like_count,comments_count", "limit": 15})
+    reels = [m for m in ig_all_media() if m.get("media_product_type") == "REELS"]
     rows, warning = [], None
-    for m in media.get("data", []):
+    for m in reels[:IG_REEL_ROWS]:
         row = {"id": m["id"], "title": (m.get("caption") or "(no caption)").split("\n")[0][:80],
                "url": m.get("permalink"), "date": m.get("timestamp", "")[:10], "type": m.get("media_product_type"),
                "likes": m.get("like_count"), "comments": m.get("comments_count")}
@@ -917,6 +942,13 @@ def ig_analytics():
         except ApiError as e:
             row["note"] = str(e)[:120]
             warning = warning or str(e)
+    total = {"reels": len(reels), "views": None, "missing": 0}
+    if not (warning and "permission" in warning):
+        older = reels[IG_REEL_ROWS:]
+        with ThreadPoolExecutor(4) as pool:
+            views = [r.get("views") for r in rows] + list(pool.map(lambda m: ig_views(m["id"]), older))
+        total["views"] = sum(v or 0 for v in views)
+        total["missing"] = sum(1 for v in views if v is None)
     if warning and "(#10)" in warning:
         warning = ("Instagram does not give the views, reach, saves or shares: the token does not have the "
                    "permission instagram_manage_insights. Generate the token again with this permission "
@@ -924,7 +956,7 @@ def ig_analytics():
     elif warning:
         warning = "Instagram did not give the insights of some posts. " + warning
     return {"account": {"name": me.get("username"), "followers": me.get("followers_count"),
-                        "posts": me.get("media_count")}, "rows": rows, "warning": warning}
+                        "posts": me.get("media_count")}, "rows": rows, "total": total, "warning": warning}
 
 
 # ---------------------------------------------------------------- YouTube

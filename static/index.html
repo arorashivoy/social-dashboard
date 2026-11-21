@@ -469,11 +469,12 @@ function platformBlock(title, color, p, cols) {
   const a = p.account, rows = p.rows, max = Math.max(1, ...rows.map(r => r.views || 0));
   const tiles = [['Account', a.name], [title === 'YouTube' ? 'Subscribers' : 'Followers', num(a.followers)], ['Posts', num(a.posts)]];
   if (a.views != null) tiles.push(['Channel views', num(a.views)]);
-  tiles.push([`Views, last ${rows.length} posts`, num(rows.reduce((s, r) => s + (r.views || 0), 0))]);
+  if (p.total) tiles.push([`Views, all ${p.total.reels} reels` + (p.total.missing ? ` (${p.total.missing} without data)` : ''), p.total.views == null ? '–' : num(p.total.views)]);
+  else tiles.push([`Views, last ${rows.length} posts`, num(rows.reduce((s, r) => s + (r.views || 0), 0))]);
   return [h('h2', {}, title), ...(p.warning ? [h('p', { class: 'note' }, p.warning)] : []),
     h('div', { class: 'tiles' }, tiles.map(([k, v]) => h('div', { class: 'tile' }, h('div', { class: 'k' }, k), h('div', { class: 'v', style: String(v).length > 9 ? 'font-size:24px' : '' }, v)))),
     h('div', { class: 'panel' },
-      h('h3', { style: 'margin-top:0' }, 'Views for each post, newest first'),
+      h('h3', { style: 'margin-top:0' }, p.total ? `Views for each reel, newest ${rows.length} of ${p.total.reels}` : 'Views for each post, newest first'),
       rows.length ? h('div', { class: 'bars', style: `--c:${color}` }, rows.flatMap(r => [
         h('a', { class: 't', href: r.url, target: '_blank', rel: 'noopener', title: r.title }, r.title),
         h('div', { class: 'b', title: `${r.title}\n${r.date} · ${num(r.views)} views` }, h('i', { style: `width:${(r.views || 0) / max * 80}%` }), num(r.views))])) : h('p', { class: 'muted' }, 'No posts.'),
