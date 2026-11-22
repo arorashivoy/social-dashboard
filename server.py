@@ -429,7 +429,7 @@ Follow the skill `ig-caption` below for the Instagram caption. It is the authori
 </skill>
 
 How to apply the skills in this run:
-- ig-viral: the dashboard did steps 1 to 3 with the YouTube Data API and `swipe.py`. The result is the SWIPE FILE
+- ig-viral: the dashboard did steps 1 to 3 with the Instagram Hashtag Search API (or the YouTube Data API if Instagram is not available) and `swipe.py`. The result is the SWIPE FILE
   below the channel profile. Do not browse and do not ask for accounts. Do step 4 in your head, and do step 5 in
   the 3 options: each option is my version of one shape that works in the top third of the swipe file (a numbered
   formula that over-indexes, or a shape that repeats in the unclassified top hooks), with the facts of this clip.
@@ -562,8 +562,7 @@ def yt_trends(game):
     """Steps 1 to 3 of the skill ig-viral, on YouTube Shorts of one game from the last 14 days.
 
     The skill names YouTube Shorts as a legitimate corpus: view counts are public and no login is necessary.
-    Official YouTube Data API only. Instagram is never read: the skill forbids automated collection on Instagram,
-    and Meta restricted this account for automated activity before. About 300 quota units for each game each day.
+    Official YouTube Data API. This is the fallback of ig_trends(). About 300 quota units for each game each day.
     """
     trends = load("trends.json", {})
     hit = trends.get(game)
@@ -625,12 +624,81 @@ def yt_trends(game):
             if t not in FILLER and (r["channel"], t) not in seen:   # one vote for each channel, not each video
                 seen.add((r["channel"], t))
                 count[t] = count.get(t, 0) + 1
-    out = {"time": time.time(), "game": game, "videos": reels,
+    out = {"time": time.time(), "game": game, "source": "YouTube", "metric": "views", "videos": reels,
            "swipe": {k: swipe[k] for k in ("baseline", "n", "accounts", "top_formulas", "top_hook_score",
                                             "bottom_hook_score", "top_words", "bottom_words", "unclassified")},
            "hashtags": sorted(count.items(), key=lambda x: -x[1])[:15]}
     trends[game] = out
     save("trends.json", trends)
+    return out
+
+
+GAME_TAG = {"GTA 6": "gta6", "Elden Ring": "eldenring", "WRC": "wrc"}   # one hashtag for each game (Meta allows 30 each 7 days)
+
+
+def ig_trends(game):
+    """Steps 1 to 3 of the skill ig-viral on Instagram, with the official Hashtag Search API (top_media).
+
+    One call for each game each day. The API gives the caption, the likes and the comments of public posts.
+    It does not give views or followers, so the outlier multiple is likes divided by the median likes of the sample.
+    It needs the Meta feature "Instagram Public Content Access" (app review) and an EAA token.
+    """
+    trends = load("ig_trends.json", {})
+    hit = trends.get(game)
+    if hit and hit.get("swipe") and time.time() - hit["time"] < TREND_TTL:
+        return hit
+    if config().get("ig_mode") != "fb":
+        raise ApiError("The Hashtag Search API needs an EAA token (Facebook login).")
+    tag = GAME_TAG.get(game) or re.sub(r"[^a-z0-9]", "", game.lower())
+    tags = load("ig_hashtag_ids.json", {})
+    if tag not in tags:                           # the id of a hashtag does not change, so ask one time only
+        found = ig("GET", "ig_hashtag_search", params={"user_id": ig_uid(), "q": tag}).get("data") or []
+        if not found:
+            raise ApiError(f"Instagram has no hashtag #{tag}.")
+        tags[tag] = found[0]["id"]
+        save("ig_hashtag_ids.json", tags)
+    media = ig("GET", f"{tags[tag]}/top_media", params={
+        "user_id": ig_uid(), "limit": 50,
+        "fields": "caption,like_count,comments_count,media_type,permalink,timestamp"}).get("data", [])
+    rows = []
+    for m in media:
+        if m.get("media_type") != "VIDEO":        # a Reel comes back as VIDEO
+            continue
+        cap = html.unescape(m.get("caption") or "")
+        first = next((ln for ln in cap.splitlines() if ln.strip()), "")
+        hook = re.sub(r"\s+", " ", re.sub(r"#\w+", "", first)).strip(" -|")
+        tags_in = sorted({t.lower() for t in re.findall(r"#\w+", cap)})
+        if hook and not any(ch.isalpha() and not ch.isascii() for ch in hook):
+            rows.append({"account": m["permalink"].rstrip("/").split("/")[-1], "likes": int(m.get("like_count") or 0),
+                         "hook": hook, "tags": tags_in, "url": m["permalink"]})
+    if len(rows) < 3:
+        raise ApiError(f"Instagram gave {len(rows)} usable Reels for #{tag}.")
+    base = max(int(statistics.median(r["likes"] for r in rows)), 1)
+    tsv = ["account\tfollowers\tmedian\tviews\thook"] + [
+        "\t".join([r["account"], "0", str(base), str(r["likes"]), r["hook"].replace("\t", " ")]) for r in rows]
+    try:
+        swipe = json.loads(skill_tool("ig-viral/swipe.py", "\n".join(tsv), "--json") or "")
+    except ValueError:
+        raise ApiError("The tool swipe.py of the skill ig-viral gave no result.") from None
+    by_hook = {(r["account"], r["hook"]): r for r in rows}
+    reels = []
+    for x in swipe["reels"]:
+        r = by_hook.get((x.get("account"), x.get("hook")), {})
+        reels.append({"account": x.get("account"), "hook": x["hook"], "views": x["views"], "baseline": x["baseline"],
+                      "multiple": x["outlier"], "formula_id": x["formula_id"], "formula": x["formula"],
+                      "hook_score": x["hook_score"], "words": x["words"], "channel": x.get("account"),
+                      "tags": r.get("tags", []), "url": r.get("url")})
+    count = {}
+    for r in reels[:max(1, len(reels) // 3)]:
+        for t in r["tags"]:
+            if t not in FILLER:
+                count[t] = count.get(t, 0) + 1
+    out = {"time": time.time(), "game": game, "source": "Instagram", "metric": "likes", "videos": reels,
+           "swipe": {k: swipe[k] for k in ("baseline", "n", "accounts", "top_formulas", "top_hook_score",
+                                            "bottom_hook_score", "top_words", "bottom_words", "unclassified")},
+           "hashtags": sorted(count.items(), key=lambda x: -x[1])[:15]}
+    trends[game] = out
+    save("ig_trends.json", trends)
     return out
 
 
@@ -641,15 +709,16 @@ def trend_text(t):
     sw, reels = t["swipe"], t["videos"]
     third = max(1, len(reels) // 3)
     strong = sw["n"] >= 40 and sw["accounts"] >= 6
-    lines = [f"SWIPE FILE (skill ig-viral, steps 1 to 3 done by the dashboard) for {t['game']}: {sw['n']} YouTube Shorts "
-             f"from the last 14 days, {sw['accounts']} channels, read on {time.strftime('%d %b %Y', time.localtime(t['time']))}. "
+    lines = [f"SWIPE FILE (skill ig-viral, steps 1 to 3 done by the dashboard) for {t['game']}: {sw['n']} {t.get('source', 'YouTube')} "
+             f"{'top Reels (ranked by likes, no view counts)' if t.get('source') == 'Instagram' else 'Shorts from the last 14 days'}, "
+             f"{sw['accounts']} {'accounts' if t.get('source') == 'Instagram' else 'channels'}, read on {time.strftime('%d %b %Y', time.localtime(t['time']))}. "
              f"Baseline: {sw['baseline']}. Confidence: "
              + ("enough to support a claim." if strong else "LOW, the sample is small. Treat it as a hint only."),
              "", f"TOP THIRD ({third} Shorts), ranked by the outlier multiple:"]
     for r in reels[:third]:
         mult = f"{r['multiple']:.1f}x" if r["multiple"] else "?"
         fid = f"#{r['formula_id']} {r['formula']}" if r["formula_id"] else "unclassified"
-        lines.append(f"- {mult} | hook {r['hook_score'] or 0:.0f} | {fid} | {r['views']:,} views | \"{r['hook']}\"")
+        lines.append(f"- {mult} | hook {r['hook_score'] or 0:.0f} | {fid} | {r['views']:,} {'likes' if t.get('metric') == 'likes' else 'views'} | \"{r['hook']}\"")
     lines += ["", "WHAT IS OVER-INDEXING",
               "  top third by formula: " + (", ".join(f"{n} x{c}" for n, c in sw["top_formulas"][:5]) or "none"),
               f"  median hook length: top {sw['top_words']} words vs bottom {sw['bottom_words']} words",
@@ -670,14 +739,19 @@ def caption_job(job, name, note):
     profile = config().get("profile", "").strip()     # the channel profile from the Setup tab is the only voice source
     game, trends = game_of(path), None
     if game:
-        step(job, f"ig-viral: read what works now for {game} on YouTube Shorts (one search each day)")
+        step(job, f"ig-viral: read what works now for {game} on Instagram (one search each day)")
         try:
-            trends = yt_trends(game)
+            trends = ig_trends(game)
+        except ApiError as e:
+            step(job, f"Instagram trends: not available ({str(e)[:160]}). Try YouTube Shorts.")
+            try:
+                trends = yt_trends(game)
+            except ApiError as e2:
+                step(job, f"Trends: not available ({str(e2)[:120]}). The captions use the profile only.")
+        if trends:
             sw = trends["swipe"]
             top = (trends["videos"][0]["multiple"] or 0) if trends["videos"] else 0
-            step(job, f"ig-viral: {sw['n']} Shorts from {sw['accounts']} channels, the best did {top:g}x its channel median")
-        except ApiError as e:
-            step(job, f"Trends: not available ({str(e)[:120]}). The captions use the profile only.")
+            step(job, f"ig-viral: {sw['n']} {trends.get('source', 'YouTube')} posts, the best did {top:g}x the median")
     ig_caption = skill_text("ig-caption")
     prompt = CAPTION_PROMPT.format(ig_caption=ig_caption, ig_human=skill_text("ig-human"), ig_viral=skill_text("ig-viral"),
                                    frames=frame_text,
