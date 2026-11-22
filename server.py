@@ -111,10 +111,30 @@ def cover_path(path):
     return c if c.is_file() else None
 
 
+_sha_cache = {}      # path -> (stat key, sha1 of the content)
+
+
+def file_sha(path):
+    """The SHA-1 of the content of a file. The hash is made again only if the inode, size, mtime or ctime changes.
+    The ctime changes on each write and a copy tool cannot keep it, so a replaced file with the same name, size
+    and mtime still gets a new hash."""
+    st = path.stat()
+    stat_key = (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    hit = _sha_cache.get(str(path))
+    if hit and hit[0] == stat_key:
+        return hit[1]
+    h = hashlib.sha1()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    _sha_cache[str(path)] = (stat_key, h.hexdigest())
+    return _sha_cache[str(path)][1]
+
+
 def preview_version(path):
-    """A number that changes when the clip or its cover changes. The page adds it to the thumbnail address."""
+    """A string that changes when the content of the clip or of its cover changes. The page adds it to the thumbnail address."""
     c = cover_path(path)
-    return round(max(path.stat().st_mtime, c.stat().st_mtime if c else 0))
+    return file_sha(path)[:12] + (file_sha(c)[:12] if c else "")
 
 
 probe_cache = load("probe.json", {})      # "name|mtime|size" -> ffprobe result, kept across restarts
@@ -140,8 +160,7 @@ def short_meta(tags):
 
 
 def probe(path):
-    st = path.stat()
-    key = f"{path.name}|{st.st_mtime}|{st.st_size}"
+    key = f"{path.name}|{file_sha(path)}"
     if key in probe_cache:
         return probe_cache[key]
     info = {"duration": 0, "width": 0, "height": 0, "vcodec": "", "acodec": "", "meta_title": "", "meta_note": ""}
@@ -292,7 +311,7 @@ def delete_inbox(name):
 def thumb_file(path):
     """The cache file of the preview. The key has the time of the cover, so a new cover makes a new preview."""
     c = cover_path(path)
-    key = f"{path.name}{path.stat().st_mtime}" + (f"|cover{c.stat().st_mtime}" if c else "")
+    key = f"{path.name}{file_sha(path)}" + (f"|cover{file_sha(c)}" if c else "")
     return DATA / "thumbs" / (hashlib.sha1(key.encode()).hexdigest()[:16] + ".jpg")
 
 
@@ -315,7 +334,7 @@ def clean_cache(days=30):
     for d in (DATA / "frames").iterdir():
         if d.is_dir() and d.stat().st_mtime < limit:
             shutil.rmtree(d, ignore_errors=True)
-    live = {f"{p.name}|{p.stat().st_mtime}|{p.stat().st_size}" for folder in (INBOX, POSTED)
+    live = {f"{p.name}|{file_sha(p)}" for folder in (INBOX, POSTED)
             for p in folder.iterdir() if p.is_file()}
     for k in [k for k in probe_cache if k not in live]:
         probe_cache.pop(k)
@@ -466,7 +485,7 @@ Reply with ONLY a JSON object, no code fence, in this shape:
 
 
 def extract_frames(path):
-    h = hashlib.sha1(f"{path}{path.stat().st_mtime}".encode()).hexdigest()[:16]
+    h = hashlib.sha1(f"{path}{file_sha(path)}".encode()).hexdigest()[:16]
     d = DATA / "frames" / h
     d.mkdir(exist_ok=True)
     dur = probe(path)["duration"] or 1
@@ -1293,7 +1312,7 @@ class Handler(BaseHTTPRequestHandler):
     def send_file(self, path, ctype=None, cache_ctl="no-cache"):
         st = path.stat()
         size = st.st_size
-        etag = f'"{int(st.st_mtime)}-{size}"'
+        etag = f'"{st.st_mtime_ns}-{st.st_ctime_ns}-{size}"'
         if self.headers.get("If-None-Match") == etag and "Range" not in self.headers:
             self.send_response(304)
             self.send_header("ETag", etag)
@@ -1521,6 +1540,6 @@ class PublicHandler(Handler):
 if __name__ == "__main__":
     pub = ThreadingHTTPServer(("127.0.0.1", PUBLIC_PORT), PublicHandler)
     threading.Thread(target=pub.serve_forever, daemon=True).start()
-    clean_cache()
+    threading.Thread(target=clean_cache, daemon=True).start()      # it hashes the clips, so it must not block the start
     print(f"social dashboard on port {PORT}, clips in {INBOX}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
