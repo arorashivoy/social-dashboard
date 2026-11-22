@@ -879,12 +879,6 @@ def public_link(job, path):
             proc.terminate()
 
 
-def ig_alt_text(caption):
-    """The alt text of a Reel: the caption without hashtags, 1000 characters or fewer."""
-    text = " ".join(w for w in (caption or "").split() if not w.startswith("#"))
-    return text[:1000].strip()
-
-
 def ig_upload(job, path, caption):
     """Instagram reads the video (and the cover, if it exists) from a temporary public link.
 
@@ -895,17 +889,9 @@ def ig_upload(job, path, caption):
     uid = c.get("ig_user_id") or ig_me().get("user_id")
     with public_link(job, path) as base:
         step(job, "Instagram: create the Reel container" + (" with the cover" if cover else ""))
-        body = {"media_type": "REELS", "video_url": f"{base}/clip{path.suffix.lower()}",
-                "caption": caption, "share_to_feed": True,
-                **({"cover_url": f"{base}/cover.jpg"} if cover else {})}
-        alt = ig_alt_text(caption)
-        try:
-            cid = ig("POST", f"{uid}/media", json={**body, "alt_text": alt})["id"] if alt else None
-        except ApiError as e:                     # the API may not accept alt_text for Reels
-            step(job, f"Instagram: alt text not accepted ({str(e)[:120]}). Try again without it.")
-            cid = None
-        if not cid:
-            cid = ig("POST", f"{uid}/media", json=body)["id"]
+        cid = ig("POST", f"{uid}/media", json={"media_type": "REELS", "video_url": f"{base}/clip{path.suffix.lower()}",
+                                               "caption": caption, "share_to_feed": True,
+                                               **({"cover_url": f"{base}/cover.jpg"} if cover else {})})["id"]
         return ig_wait_publish(job, uid, cid)
 
 
