@@ -1277,7 +1277,7 @@ def upload_job(job, name, body):
             s["history"].insert(0, {"clip": name, "file": name, "time": time.time(),
                                     "ig_caption": body.get("ig_caption"),
                                     "yt_title": body.get("yt_title"), "results": results, "errors": errors})
-        if results and not errors:
+        if results:                       # a clip that is on one platform or more is posted
             s["drafts"].pop(name, None)
             dest = POSTED / name
             if dest.exists():
@@ -1293,7 +1293,7 @@ def upload_job(job, name, body):
     if errors and not results:
         raise ApiError(" | ".join(f"{k}: {v}" for k, v in errors.items()))
     if errors:
-        step(job, "One platform failed. The clip stays in the inbox. Upload again to the failed platform only.")
+        step(job, "One platform failed. The clip is in the posted folder because the other platform has it.")
 
 
 # ---------------------------------------------------------------- HTTP
